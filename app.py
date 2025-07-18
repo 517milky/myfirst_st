@@ -29,23 +29,22 @@ def download_video(url):
         info = ydl.extract_info(url, download=True)
         return info.get('title', '영상')
 
-query_params = st.experimental_get_query_params()
+query_params = st.query_params
+
+# 쿼리 파라미터에서 video ID 추출 후 유튜브 전체 링크 생성
+default_url = ""
 if 'video' in query_params:
-    url = f"https://www.youtube.com/watch?v={query_params['video'][0]}"
-    st.experimental_set_query_params()  # 파라미터 제거
-    with st.spinner("자동 다운로드 중..."):
+    video_id = query_params['video'][0]
+    default_url = f"https://www.youtube.com/watch?v={video_id}"
+
+# 입력창에 기본값 세팅
+url = st.text_input("🔗 유튜브 영상 또는 재생목록 URL을 입력하세요:", value=default_url)
+
+if url and st.button("📥 다운로드 시작"):
+    with st.spinner("다운로드 중..."):
         try:
             title = download_video(url)
-            st.success(f"✅ 자동 다운로드 완료: {title}")
+            st.success(f"✅ 다운로드 완료: {title}")
+            st.info(f"폴더 경로: `{os.path.abspath(download_path)}`")
         except Exception as e:
-            st.error(f"❌ 자동 다운로드 오류: {str(e)}")
-else:
-    url = st.text_input("🔗 유튜브 영상 또는 재생목록 URL을 입력하세요:", "")
-    if url and st.button("📥 다운로드 시작"):
-        with st.spinner("다운로드 중..."):
-            try:
-                title = download_video(url)
-                st.success(f"✅ 다운로드 완료: {title}")
-                st.info(f"폴더 경로: `{os.path.abspath(download_path)}`")
-            except Exception as e:
-                st.error(f"❌ 오류 발생: {str(e)}")
+            st.error(f"❌ 오류 발생: {str(e)}")
