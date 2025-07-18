@@ -2,3 +2,4 @@ streamlit
 yt_dlp
 ffmpeg
 pytube
+moviepy
