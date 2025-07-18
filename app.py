@@ -1,5 +1,5 @@
 import streamlit as st
-from pytube import YouTube
+from pytube import YouTube, Playlist
 import os
 import uuid
 import subprocess
@@ -11,15 +11,6 @@ def clean_url(url):
     elif url.startswith("https://wwwyoutube"):
         url = url.replace("wwwyoutube", "www.youtube")
     return url
-
-def extract_video_url(url):
-    parsed_url = urlparse(url)
-    query_params = parse_qs(parsed_url.query)
-    if 'v' in query_params:
-        video_id = query_params['v'][0]
-        return f"https://www.youtube.com/watch?v={video_id}"
-    else:
-        return url
 
 def merge_video_audio(video_path, audio_path, output_path):
     command = [
@@ -53,53 +44,84 @@ def download_stream(youtube_obj, only_audio=False, high_quality=False):
         stream = youtube_obj.streams.filter(progressive=True, file_extension="mp4").order_by("resolution").desc().first()
         return stream.download()
 
+def is_playlist(url):
+    parsed_url = urlparse(url)
+    query_params = parse_qs(parsed_url.query)
+    return 'list' in query_params
+
 st.set_page_config(page_title="YouTube 다운로더", layout="centered")
-st.title("📥 YouTube 영상 다운로드")
+st.title("📥 YouTube 영상/재생목록 다운로드기")
 
 url_input = st.text_input("🔗 YouTube 링크를 입력하세요:")
 
 if url_input:
     url = clean_url(url_input)
-    video_url = extract_video_url(url)
+
     try:
-        yt = YouTube(video_url)
-        st.video(video_url)
+        if is_playlist(url):
+            pl = Playlist(url)
+            st.write(f"재생목록: {pl.title}")
+            st.write(f"영상 수: {len(pl.video_urls)}")
 
-        st.subheader("🎬 영상 정보")
-        st.image(yt.thumbnail_url)
-        st.write(f"**제목:** {yt.title}")
-        st.write(f"**길이:** {yt.length}초")
-        st.write(f"**채널:** {yt.author}")
+            selected_video_url = st.selectbox("다운로드할 영상을 선택하세요:", pl.video_urls)
 
-        st.subheader("⬇️ 다운로드 옵션")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            video_only = st.button("🎞️ 영상만 다운로드")
-        with col2:
-            audio_only = st.button("🎧 오디오만 다운로드")
-        with col3:
-            both_high = st.button("💎 고화질 영상+오디오 다운로드")
+            if st.button("📥 선택 영상 다운로드"):
+                yt = YouTube(selected_video_url)
+                st.video(selected_video_url)
+                filepath = download_stream(yt, only_audio=False, high_quality=False)
+                st.success("✅ 다운로드 완료!")
+                with open(filepath, "rb") as f:
+                    st.download_button("📥 영상 다운로드", f, file_name=f"{yt.title}.mp4")
+                os.remove(filepath)
 
-        if both_high:
-            filepath = download_stream(yt, high_quality=True)
-            st.success("✅ 다운로드 완료!")
-            with open(filepath, "rb") as f:
-                st.download_button("📥 영상 다운로드", f, file_name="merged_video.mp4")
-            os.remove(filepath)
+        else:  # 단일 영상 처리
+            # 영상 ID만 추출해 안정성 확보
+            parsed_url = urlparse(url)
+            query_params = parse_qs(parsed_url.query)
+            video_id = query_params.get('v', [None])[0]
+            if video_id is None:
+                st.error("❌ 유효한 YouTube 영상 URL이 아닙니다.")
+            else:
+                video_url = f"https://www.youtube.com/watch?v={video_id}"
+                yt = YouTube(video_url)
 
-        elif video_only:
-            filepath = download_stream(yt, only_audio=False, high_quality=False)
-            st.success("✅ 다운로드 완료!")
-            with open(filepath, "rb") as f:
-                st.download_button("📥 영상 다운로드", f, file_name="video_only.mp4")
-            os.remove(filepath)
+                st.video(video_url)
 
-        elif audio_only:
-            filepath = download_stream(yt, only_audio=True)
-            st.success("✅ 다운로드 완료!")
-            with open(filepath, "rb") as f:
-                st.download_button("📥 오디오 다운로드", f, file_name="audio_only.mp3")
-            os.remove(filepath)
+                st.subheader("🎬 영상 정보")
+                st.image(yt.thumbnail_url)
+                st.write(f"**제목:** {yt.title}")
+                st.write(f"**길이:** {yt.length}초")
+                st.write(f"**채널:** {yt.author}")
+
+                st.subheader("⬇️ 다운로드 옵션")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    video_only = st.button("🎞️ 영상만 다운로드")
+                with col2:
+                    audio_only = st.button("🎧 오디오만 다운로드")
+                with col3:
+                    both_high = st.button("💎 고화질 영상+오디오 다운로드")
+
+                if both_high:
+                    filepath = download_stream(yt, high_quality=True)
+                    st.success("✅ 다운로드 완료!")
+                    with open(filepath, "rb") as f:
+                        st.download_button("📥 영상 다운로드", f, file_name="merged_video.mp4")
+                    os.remove(filepath)
+
+                elif video_only:
+                    filepath = download_stream(yt, only_audio=False, high_quality=False)
+                    st.success("✅ 다운로드 완료!")
+                    with open(filepath, "rb") as f:
+                        st.download_button("📥 영상 다운로드", f, file_name="video_only.mp4")
+                    os.remove(filepath)
+
+                elif audio_only:
+                    filepath = download_stream(yt, only_audio=True)
+                    st.success("✅ 다운로드 완료!")
+                    with open(filepath, "rb") as f:
+                        st.download_button("📥 오디오 다운로드", f, file_name="audio_only.mp3")
+                    os.remove(filepath)
 
     except Exception as e:
         st.error(f"❌ 오류 발생: {str(e)}")
