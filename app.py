@@ -3,6 +3,7 @@ from pytube import YouTube
 import os
 import uuid
 import subprocess
+from urllib.parse import urlparse, parse_qs
 
 def clean_url(url):
     if url.startswith("https://wwwyoutube.streamlit.app"):
@@ -10,6 +11,15 @@ def clean_url(url):
     elif url.startswith("https://wwwyoutube"):
         url = url.replace("wwwyoutube", "www.youtube")
     return url
+
+def extract_video_url(url):
+    parsed_url = urlparse(url)
+    query_params = parse_qs(parsed_url.query)
+    if 'v' in query_params:
+        video_id = query_params['v'][0]
+        return f"https://www.youtube.com/watch?v={video_id}"
+    else:
+        return url
 
 def merge_video_audio(video_path, audio_path, output_path):
     command = [
@@ -50,9 +60,10 @@ url_input = st.text_input("🔗 YouTube 링크를 입력하세요:")
 
 if url_input:
     url = clean_url(url_input)
+    video_url = extract_video_url(url)
     try:
-        yt = YouTube(url)
-        st.video(url)
+        yt = YouTube(video_url)
+        st.video(video_url)
 
         st.subheader("🎬 영상 정보")
         st.image(yt.thumbnail_url)
