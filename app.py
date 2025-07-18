@@ -3,6 +3,7 @@ import yt_dlp
 import os
 import time
 from datetime import timedelta
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 st.set_page_config(page_title="YouTube 다운로드", layout="centered")
 st.title("🎬 YouTube 영상/재생목록 다운로드기")
@@ -57,7 +58,49 @@ def get_video_info(url):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         return ydl.extract_info(url, download=False)
 
-url = st.text_input("🔗 유튜브 영상 또는 재생목록 URL을 입력하세요:")
+# --- URL 쿼리에서 유튜브 원본 URL 파싱 함수 ---
+def parse_youtube_url_from_path_and_query():
+    params = st.query_params
+    path = st.experimental_get_query_params().get("_path", [""])[0]  # fallback: 빈 문자열
+    # 스트림릿에서 직접 경로 받아오기 어렵기 때문에 쿼리로 안 들어오면 fallback 처리
+    
+    # 1) path가 '/watch' 이고 쿼리가 있을 때
+    # 2) query 파라미터를 재조합해서 유튜브 URL 만들기
+    # 예: /watch?v=xxx&list=yyy -> https://www.youtube.com/watch?v=xxx&list=yyy
+    
+    if path.startswith("watch") or path == "watch":  # '/watch' 앞 '/' 없어질 수 있음
+        # 쿼리 파라미터 가져오기
+        qparams = params.copy()
+        # qparams 안에 v, list, index 등 있을 수 있음
+        
+        # 유튜브 기본 도메인
+        youtube_base = "https://www.youtube.com/watch"
+        
+        # 쿼리 문자열 만들기
+        qs = urlencode(qparams, doseq=True)
+        
+        full_url = youtube_base
+        if qs:
+            full_url += "?" + qs
+        
+        return full_url
+    
+    # 쿼리에 url 파라미터가 있을 경우 그걸 우선 사용
+    if "url" in params:
+        return params["url"][0]
+    
+    return ""
+
+# 초기 유튜브 URL값 세션 상태에 세팅
+if "url_input" not in st.session_state:
+    st.session_state["url_input"] = parse_youtube_url_from_path_and_query()
+else:
+    # 쿼리가 바뀌면 세션 상태도 업데이트
+    current_url = parse_youtube_url_from_path_and_query()
+    if current_url and current_url != st.session_state["url_input"]:
+        st.session_state["url_input"] = current_url
+
+url = st.text_input("🔗 유튜브 영상 또는 재생목록 URL을 입력하세요:", value=st.session_state.get("url_input", ""))
 
 if url:
     try:
