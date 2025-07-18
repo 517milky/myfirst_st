@@ -1,29 +1,21 @@
+# app.py
 import streamlit as st
-from yt_dlp import YoutubeDL
+from pytube import YouTube
 import os
 import uuid
 import subprocess
-from datetime import timedelta
 
-st.set_page_config(page_title="YouTube Downloader", layout="centered")
-st.title("🎬 YouTube 영상/재생목록 다운로드기")
-
-DOWNLOAD_PATH = "downloads"
-os.makedirs(DOWNLOAD_PATH, exist_ok=True)
-
-def fix_custom_url(url):
+def clean_url(url):
     if url.startswith("https://wwwyoutube.streamlit.app"):
         url = url.replace("https://wwwyoutube.streamlit.app", "https://www.youtube.com")
     elif url.startswith("https://wwwyoutube"):
         url = url.replace("wwwyoutube", "www.youtube")
     return url
 
-def format_timedelta(seconds):
-    return str(timedelta(seconds=int(seconds)))
-
 def merge_video_audio(video_path, audio_path, output_path):
     command = [
-        'ffmpeg', '-y',
+        'ffmpeg',
+        '-y',
         '-i', video_path,
         '-i', audio_path,
         '-c:v', 'copy',
@@ -32,153 +24,135 @@ def merge_video_audio(video_path, audio_path, output_path):
     ]
     subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-def format_bytes(size):
-    for unit in ['B','KB','MB','GB','TB']:
-        if size < 1024:
-            return f"{size:.2f} {unit}"
-        size /= 1024
-    return f"{size:.2f} PB"
-
-def get_info(url):
-    ydl_opts = {'quiet': True, 'skip_download': True}
-    with YoutubeDL(ydl_opts) as ydl:
-        return ydl.extract_info(url, download=False)
-
-def download_media(url, format_id):
-    ydl_opts = {
-        'format': format_id,
-        'outtmpl': f'{DOWNLOAD_PATH}/%(title)s.%(ext)s',
-        'quiet': True,
-        'noplaylist': False,
-        'merge_output_format': 'mp4',
-    }
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-    return info
-
-def download_high_quality(url):
-    # 영상-only + 오디오-only 각각 다운로드 후 병합
-    ydl_opts_video = {
-        'format': 'bv[ext=mp4]+ba[ext=m4a]/bestvideo+bestaudio',
-        'outtmpl': f'{DOWNLOAD_PATH}/video_{uuid.uuid4()}.mp4',
-        'quiet': True,
-    }
-    ydl_opts_audio = {
-        'format': 'ba[ext=m4a]/bestaudio',
-        'outtmpl': f'{DOWNLOAD_PATH}/audio_{uuid.uuid4()}.m4a',
-        'quiet': True,
-    }
-    with YoutubeDL(ydl_opts_video) as ydl:
-        video_info = ydl.extract_info(url, download=True)
-        video_path = ydl.prepare_filename(video_info)
-
-    with YoutubeDL(ydl_opts_audio) as ydl:
-        audio_info = ydl.extract_info(url, download=True)
-        audio_path = ydl.prepare_filename(audio_info)
-
-    output_path = f"{DOWNLOAD_PATH}/merged_{uuid.uuid4()}.mp4"
-    merge_video_audio(video_path, audio_path, output_path)
-
-    os.remove(video_path)
-    os.remove(audio_path)
-
-    return output_path
-
-input_url = st.text_input("🔗 유튜브 영상 또는 재생목록 URL을 입력하세요:", value="", placeholder="https://wwwyoutube.streamlit.app/watch?v=XXXX")
-
-if input_url:
-    url = fix_custom_url(input_url.strip())
-
-    try:
-        info = get_info(url)
-    except Exception as e:
-        st.error(f"❌ 영상 정보 불러오기 실패: {e}")
-        st.stop()
-
-    is_playlist = '_type' in info and info['_type'] == 'playlist'
-
-    if is_playlist:
-        st.subheader("📃 재생목록 정보")
-        st.write(f"제목: {info.get('title')}")
-        st.write(f"영상 수: {len(info.get('entries', []))}")
+def download_stream(youtube_obj, only_audio=False, high_quality=False):
+    if only_audio:
+        audio_stream = youtube_obj.streams.filter(only_audio=True).order_by("abr").desc().first()
+        return audio_stream.download()
+    if high_quality:
+        video_stream = youtube_obj.streams.filter(progressive=False, file_extension="mp4").order_by("resolution").desc().first()
+        audio_stream = youtube_obj.streams.filter(only_audio=True).order_by("abr").desc().first()
+        if video_stream and audio_stream:
+            st.info("⏳ 고화질 영상 및 오디오 다운로드 중입니다. 시간이 오래 걸릴 수 있습니다.")
+            video_path = video_stream.download(filename_prefix="video_")
+            audio_path = audio_stream.download(filename_prefix="audio_")
+            output_path = f"merged_{uuid.uuid4()}.mp4"
+            merge_video_audio(video_path, audio_path, output_path)
+            os.remove(video_path)
+            os.remove(audio_path)
+            return output_path
+        else:
+            raise Exception("고화질 영상 또는 오디오 스트림을 찾을 수 없습니다.")
     else:
-        st.subheader("🎥 영상 정보")
+        # progressive 스트림에서 최고 화질(360p 이하)
+        stream = youtube_obj.streams.filter(progressive=True, file_extension="mp4").order_by("resolution").desc().first()
+        return stream.download()
+
+def format_bytes(size):
+    power = 2**10
+    n = 0
+    units = ['B', 'KB', 'MB', 'GB', 'TB']
+    while size > power and n < len(units)-1:
+        size /= power
+        n += 1
+    return f"{size:.2f} {units[n]}"
+
+def get_available_formats(youtube_obj):
+    formats = []
+    # progressive 스트림 (영상+오디오 같이 있음) - 보통 360p 이하
+    prog_streams = youtube_obj.streams.filter(progressive=True, file_extension="mp4").order_by("resolution").desc()
+    for s in prog_streams:
+        filesize = s.filesize or s.filesize_approx or 0
+        filesize_str = format_bytes(filesize) if filesize > 0 else "알 수 없음"
+        label = f"{s.resolution} (영상+오디오) - {filesize_str}"
+        formats.append(("prog_" + s.itag, label, s.itag))
+
+    # 영상-only 스트림 (고화질)
+    video_only_streams = youtube_obj.streams.filter(progressive=False, file_extension="mp4", only_video=True).order_by("resolution").desc()
+    for s in video_only_streams:
+        filesize = s.filesize or s.filesize_approx or 0
+        filesize_str = format_bytes(filesize) if filesize > 0 else "알 수 없음"
+        label = f"{s.resolution} (영상 전용) - {filesize_str}"
+        formats.append(("video_" + s.itag, label, s.itag))
+
+    # 오디오-only 스트림
+    audio_streams = youtube_obj.streams.filter(only_audio=True).order_by("abr").desc()
+    for s in audio_streams:
+        filesize = s.filesize or s.filesize_approx or 0
+        filesize_str = format_bytes(filesize) if filesize > 0 else "알 수 없음"
+        label = f"{s.abr} kbps (오디오 전용) - {filesize_str}"
+        formats.append(("audio_" + s.itag, label, s.itag))
+
+    return formats
+
+st.set_page_config(page_title="YouTube 다운로더", layout="centered")
+st.title("📥 YouTube 영상 다운로드")
+
+url_input = st.text_input("🔗 YouTube 링크를 입력하세요:")
+
+if url_input:
+    url = clean_url(url_input)
+    try:
+        yt = YouTube(url)
         st.video(url)
-        st.write(f"제목: {info.get('title')}")
-        st.write(f"채널: {info.get('uploader')}")
-        dur = info.get('duration')
-        if dur:
-            st.write(f"길이: {format_timedelta(dur)}")
 
-    formats = info.get('formats', [])
+        st.subheader("🎬 영상 정보")
+        st.image(yt.thumbnail_url)
+        st.write(f"**제목:** {yt.title}")
+        st.write(f"**길이:** {yt.length}초")
+        st.write(f"**채널:** {yt.author}")
 
-    # progressive (영상+오디오 같이 포함, 보통 360p 이하)
-    progressive_formats = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') != 'none' and f.get('format_note') != 'unknown']
-    progressive_formats.sort(key=lambda x: x.get('height') or 0)
+        st.subheader("⬇️ 다운로드 옵션")
 
-    # 영상 전용 (고화질 포함)
-    video_only_formats = [f for f in formats if f.get('vcodec') != 'none' and f.get('acodec') == 'none' and f.get('ext') == 'mp4']
-    video_only_formats.sort(key=lambda x: x.get('height') or 0)
+        formats = get_available_formats(yt)
 
-    # 오디오 전용
-    audio_only_formats = [f for f in formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none']
-    audio_only_formats.sort(key=lambda x: x.get('abr') or 0)
+        # 화질 선택박스 (progressive + video-only + audio-only 모두 나열)
+        option_labels = [f[1] for f in formats]
+        selected_index = st.selectbox("다운로드할 화질/형식을 선택하세요:", range(len(option_labels)), format_func=lambda x: option_labels[x])
 
-    st.subheader("⚙️ 다운로드 옵션")
-    dl_type = st.radio("다운로드 유형 선택:", ["영상+오디오 (360p 이하)", "영상만 (고화질 가능)", "오디오만"])
+        selected_tag_prefix, selected_label, selected_itag = formats[selected_index]
 
-    selected_format = None
+        # 고화질 영상+오디오 별도 처리
+        if st.button("💎 고화질 영상+오디오 다운로드 (별도 합침)"):
+            try:
+                video_stream = yt.streams.get_by_itag(selected_itag)
+                if not video_stream or video_stream.is_progressive:
+                    st.error("고화질 영상-only 스트림을 선택해주세요.")
+                else:
+                    audio_stream = yt.streams.filter(only_audio=True).order_by("abr").desc().first()
+                    if not audio_stream:
+                        st.error("오디오 스트림을 찾을 수 없습니다.")
+                    else:
+                        st.info("⏳ 고화질 영상 및 오디오 다운로드 중입니다. 시간이 오래 걸릴 수 있습니다.")
+                        video_path = video_stream.download(filename_prefix="video_")
+                        audio_path = audio_stream.download(filename_prefix="audio_")
+                        output_path = f"merged_{uuid.uuid4()}.mp4"
+                        merge_video_audio(video_path, audio_path, output_path)
+                        os.remove(video_path)
+                        os.remove(audio_path)
+                        st.success("✅ 다운로드 완료!")
+                        with open(output_path, "rb") as f:
+                            st.download_button("📥 영상+오디오 합친 파일 다운로드", f, file_name="merged_video.mp4")
+                        os.remove(output_path)
+            except Exception as e:
+                st.error(f"❌ 오류 발생: {str(e)}")
 
-    if dl_type == "영상+오디오 (360p 이하)":
-        if not progressive_formats:
-            st.warning("영상+오디오 포함된 포맷이 없습니다.")
-        options = {f['format_id']: f"{f.get('format_note', '')} - {format_bytes(f.get('filesize') or 0)}" for f in progressive_formats}
-        selected_format = st.selectbox("화질 선택:", list(options.keys()), format_func=lambda x: options[x])
-
-    elif dl_type == "영상만 (고화질 가능)":
-        if not video_only_formats:
-            st.warning("영상 전용 포맷이 없습니다.")
-        options = {f['format_id']: f"{f.get('height', '')}p - {format_bytes(f.get('filesize') or 0)}" for f in video_only_formats}
-        selected_format = st.selectbox("화질 선택:", list(options.keys()), format_func=lambda x: options[x])
-        if selected_format:
-            height = next((f.get('height', 0) for f in video_only_formats if f['format_id'] == selected_format), 0)
-            if height >= 720:
-                st.info("⏳ 고화질 다운로드 시 시간이 오래 걸릴 수 있습니다.")
-
-    else:  # 오디오만
-        if not audio_only_formats:
-            st.warning("오디오 전용 포맷이 없습니다.")
-        options = {f['format_id']: f"{f.get('abr', '')}kbps - {format_bytes(f.get('filesize') or 0)}" for f in audio_only_formats}
-        selected_format = st.selectbox("음질 선택:", list(options.keys()), format_func=lambda x: options[x])
-
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("📥 다운로드 시작"):
-            if dl_type == "영상만 (고화질 가능)":
+        else:
+            if st.button("🎞️ 선택한 화질/형식 다운로드"):
                 try:
-                    with st.spinner("다운로드 중 (영상+오디오 병합)..."):
-                        output_path = download_high_quality(url)
-                    st.success("✅ 고화질 영상+오디오 다운로드 완료!")
-                    with open(output_path, "rb") as f:
-                        st.download_button("📥 파일 다운로드", f, file_name=os.path.basename(output_path))
-                    os.remove(output_path)
+                    stream = yt.streams.get_by_itag(selected_itag)
+                    if not stream:
+                        st.error("선택한 스트림을 찾을 수 없습니다.")
+                    else:
+                        st.info("⏳ 다운로드 중입니다...")
+                        filepath = stream.download()
+                        st.success("✅ 다운로드 완료!")
+                        with open(filepath, "rb") as f:
+                            st.download_button("📥 다운로드", f, file_name=os.path.basename(filepath))
+                        os.remove(filepath)
                 except Exception as e:
-                    st.error(f"❌ 다운로드 오류: {e}")
-            else:
-                try:
-                    with st.spinner("다운로드 중..."):
-                        info_dl = download_media(url, selected_format)
-                    filename = info_dl.get('title') + "." + info_dl.get('ext', 'mp4')
-                    filepath = os.path.join(DOWNLOAD_PATH, filename)
-                    st.success(f"✅ 다운로드 완료: {info_dl.get('title')}")
-                    with open(filepath, "rb") as f:
-                        st.download_button("📥 파일 다운로드", f, file_name=filename)
-                except Exception as e:
-                    st.error(f"❌ 다운로드 오류: {e}")
+                    st.error(f"❌ 오류 발생: {str(e)}")
 
-    with col2:
-        st.write("💡 고화질 영상(1080p 이상)은 영상만 + 오디오만 스트림을 따로 다운받아\n"
-                 "ffmpeg로 병합합니다.\n"
-                 "⚠️ 시간이 오래 걸릴 수 있습니다.")
+    except Exception as e:
+        st.error(f"❌ 오류 발생: {str(e)}")
 else:
-    st.info("유튜브 영상 또는 재생목록 링크를 입력해주세요.")
+    st.info("다운로드할 YouTube 영상 또는 재생목록 URL을 입력하세요.")
