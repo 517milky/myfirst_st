@@ -57,16 +57,7 @@ def get_video_info(url):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         return ydl.extract_info(url, download=False)
 
-query_params = st.query_params
-video_id = None
-if 'v' in query_params and query_params['v'][0]:
-    video_id = query_params['v'][0]
-elif 'video' in query_params and query_params['video'][0]:
-    video_id = query_params['video'][0]
-
-default_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else ""
-
-url = st.text_input("🔗 유튜브 영상 또는 재생목록 URL을 입력하세요:", value=default_url)
+url = st.text_input("🔗 유튜브 영상 또는 재생목록 URL을 입력하세요:")
 
 if url:
     try:
