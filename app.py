@@ -5,7 +5,9 @@ import uuid
 import subprocess
 
 def clean_url(url):
-    if url.startswith("https://wwwyoutube"):
+    if url.startswith("https://wwwyoutube.streamlit.app"):
+        url = url.replace("https://wwwyoutube.streamlit.app", "https://www.youtube.com")
+    elif url.startswith("https://wwwyoutube"):
         url = url.replace("wwwyoutube", "www.youtube")
     return url
 
