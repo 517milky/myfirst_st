@@ -31,13 +31,17 @@ def download_video(url):
 
 query_params = st.query_params
 
-# 쿼리 파라미터에서 video ID 추출 후 유튜브 전체 링크 생성
-default_url = ""
-if 'video' in query_params:
+# /watch 경로는 무시하고 쿼리만 처리
+video_id = None
+if 'v' in query_params:
+    video_id = query_params['v'][0]
+elif 'video' in query_params:
     video_id = query_params['video'][0]
+
+default_url = ""
+if video_id:
     default_url = f"https://www.youtube.com/watch?v={video_id}"
 
-# 입력창에 기본값 세팅
 url = st.text_input("🔗 유튜브 영상 또는 재생목록 URL을 입력하세요:", value=default_url)
 
 if url and st.button("📥 다운로드 시작"):
