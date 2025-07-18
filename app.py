@@ -1,75 +1,74 @@
 import streamlit as st
-from pytube import YouTube
-import time
+import subprocess
 import os
+import time
+import uuid
 
-st.set_page_config(page_title="YouTube 다운로더", layout="centered")
+st.set_page_config(page_title="YouTube 다운로더")
 st.title("🎬 YouTube 영상 다운로드기")
 
 url = st.text_input("YouTube 영상 URL을 입력하세요")
 download_type = st.radio("다운로드 방식 선택", ["🎞️ 영상만", "🔊 소리만", "🎥 영상 + 소리"])
 
-if url:
+quality = st.selectbox("해상도 선택", ["1080p", "720p", "480p", "360p", "자동"], index=1)
+
+if url and st.button("다운로드"):
     try:
-        yt = YouTube(url)
+        uid = uuid.uuid4().hex[:8]
+        filename = f"download_{uid}.mp4"
+        audio_filename = f"download_{uid}.m4a"
 
-        st.video(url)
-        st.success(f"제목: {yt.title}")
+        quality_flag = {
+            "1080p": "bestvideo[height<=1080]+bestaudio",
+            "720p": "bestvideo[height<=720]+bestaudio",
+            "480p": "bestvideo[height<=480]+bestaudio",
+            "360p": "bestvideo[height<=360]+bestaudio",
+            "자동": "best"
+        }
 
-        progress_text = st.empty()
-        progress_bar = st.progress(0)
+        with st.spinner("다운로드 중..."):
+            start = time.time()
 
-        def update_progress(stream, chunk, bytes_remaining):
-            total = stream.filesize
-            downloaded = total - bytes_remaining
-            percent = int(downloaded / total * 100)
-            progress_bar.progress(percent)
-            progress_text.text(f"📦 다운로드 중: {percent}%")
+            if download_type == "🎥 영상 + 소리":
+                output = subprocess.run([
+                    "yt-dlp",
+                    "-f", quality_flag[quality],
+                    "-o", filename,
+                    url
+                ], capture_output=True, text=True)
 
-        yt.register_on_progress_callback(update_progress)
+            elif download_type == "🎞️ 영상만":
+                output = subprocess.run([
+                    "yt-dlp",
+                    "-f", f"bestvideo[height<={quality.replace('p', '')}]",
+                    "-o", filename,
+                    url
+                ], capture_output=True, text=True)
 
-        stream = None
+            elif download_type == "🔊 소리만":
+                output = subprocess.run([
+                    "yt-dlp",
+                    "-f", "bestaudio",
+                    "-o", audio_filename,
+                    "--extract-audio",
+                    "--audio-format", "mp3",
+                    url
+                ], capture_output=True, text=True)
+                filename = audio_filename.replace(".m4a", ".mp3")
 
-        if download_type == "🎞️ 영상만":
-            video_streams = yt.streams.filter(only_video=True, file_extension='mp4').order_by("resolution").desc()
-            resolutions = sorted({s.resolution for s in video_streams if s.resolution}, reverse=True)
-            selected_resolution = st.selectbox("화질 선택", resolutions)
-            stream = next((s for s in video_streams if s.resolution == selected_resolution), None)
+            end = time.time()
 
-        elif download_type == "🔊 소리만":
-            audio_streams = yt.streams.filter(only_audio=True, file_extension='mp4').order_by("abr").desc()
-            stream = audio_streams.first()
+        if output.returncode != 0:
+            st.error("❌ 다운로드 실패:\n" + output.stderr)
+        else:
+            st.success(f"다운로드 완료! (소요 시간: {int(end - start)}초)")
+            with open(filename, "rb") as f:
+                st.download_button("⬇ 파일 다운로드", data=f, file_name=filename)
 
-        elif download_type == "🎥 영상 + 소리":
-            prog_streams = yt.streams.filter(progressive=True, file_extension='mp4').order_by("resolution").desc()
-            if not prog_streams:
-                st.warning("⚠️ 이 영상은 영상+소리 스트림을 지원하지 않습니다.\n'영상만' 또는 '소리만'으로 시도해 주세요.")
-            else:
-                resolutions = sorted({s.resolution for s in prog_streams if s.resolution}, reverse=True)
-                selected_resolution = st.selectbox("화질 선택", resolutions)
-                stream = next((s for s in prog_streams if s.resolution == selected_resolution), None)
-
-        if stream and st.button("📥 다운로드 시작"):
-            filename = f"{yt.title}.{stream.mime_type.split('/')[-1]}"
-            temp_path = "temp_file"
-
-            with st.spinner("⌛ 다운로드 중..."):
-                start = time.time()
-                try:
-                    stream.download(filename=temp_path)
-                except Exception as e:
-                    st.error(f"❌ 다운로드 실패: {e}")
-                    st.stop()
-                end = time.time()
-
-            st.success(f"✅ 다운로드 완료! (소요 시간: {int(end - start)}초)")
-
-            with open(temp_path, "rb") as f:
-                st.download_button("⬇️ 파일 다운로드", data=f, file_name=filename, mime=stream.mime_type)
-
-            # 임시 파일 삭제
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+        # 파일 정리
+        for f in [filename, audio_filename]:
+            if os.path.exists(f):
+                os.remove(f)
 
     except Exception as e:
         st.error(f"❌ 오류 발생: {e}")
