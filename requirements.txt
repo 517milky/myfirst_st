@@ -1,2 +1,2 @@
 streamlit
-git+https://github.com/pytube/pytube
+yt-dlp
