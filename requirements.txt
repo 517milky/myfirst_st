@@ -3,3 +3,4 @@ yt_dlp
 ffmpeg
 pytube
 moviepy
+git+https://github.com/pytube/pytube
