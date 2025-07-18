@@ -1,1 +1,2 @@
 streamlit
+yt_dlp
