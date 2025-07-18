@@ -32,26 +32,30 @@ if url:
             video_streams = yt.streams.filter(only_video=True, file_extension='mp4').order_by("resolution").desc()
             resolutions = sorted({s.resolution for s in video_streams if s.resolution}, reverse=True)
             selected_resolution = st.selectbox("화질 선택", resolutions)
-
             stream = next((s for s in video_streams if s.resolution == selected_resolution), None)
 
         elif download_type == "🔊 소리만":
-            audio_stream = yt.streams.filter(only_audio=True, file_extension='mp4').order_by("abr").desc().first()
-            stream = audio_stream
+            stream = yt.streams.filter(only_audio=True, file_extension='mp4').order_by("abr").desc().first()
 
         elif download_type == "🎥 영상 + 소리":
             prog_streams = yt.streams.filter(progressive=True, file_extension='mp4').order_by("resolution").desc()
-            resolutions = sorted({s.resolution for s in prog_streams if s.resolution}, reverse=True)
-            selected_resolution = st.selectbox("화질 선택", resolutions)
-
-            stream = next((s for s in prog_streams if s.resolution == selected_resolution), None)
+            if not prog_streams:
+                st.warning("⚠️ 이 영상은 영상+소리 스트림을 지원하지 않습니다. 영상만/소리만으로 시도해 주세요.")
+            else:
+                resolutions = sorted({s.resolution for s in prog_streams if s.resolution}, reverse=True)
+                selected_resolution = st.selectbox("화질 선택", resolutions)
+                stream = next((s for s in prog_streams if s.resolution == selected_resolution), None)
 
         if stream and st.button("다운로드"):
             filename = f"{yt.title}.mp4" if "video" in stream.mime_type else f"{yt.title}.mp3"
 
             with st.spinner("다운로드 중..."):
                 start = time.time()
-                stream.download(filename="temp_file")
+                try:
+                    stream.download(filename="temp_file")
+                except Exception as e:
+                    st.error(f"❌ 다운로드 실패: {e}")
+                    st.stop()
                 end = time.time()
 
             st.success(f"다운로드 완료! (소요 시간: {int(end - start)}초)")
