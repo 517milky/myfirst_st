@@ -4,11 +4,11 @@ import subprocess
 import uuid
 import glob
 import time
-import json
 
 st.set_page_config(page_title="YouTube 다운로더", layout="centered")
 st.title("🎬 YouTube 영상 다운로드기")
 
+# URL 수정 함수
 def clean_url(url):
     if url.startswith("https://wwwyoutube.streamlit.app"):
         url = url.replace("https://wwwyoutube.streamlit.app", "https://www.youtube.com")
@@ -16,14 +16,18 @@ def clean_url(url):
         url = url.replace("wwwyoutube", "www.youtube")
     return url
 
+# URL 입력
 url_input = st.text_input("YouTube 영상 URL을 입력하세요:")
 
+# 다운로드 옵션
 download_type = st.radio("다운로드 방식 선택", ["🎞️ 영상만", "🔊 소리만", "🎥 영상 + 소리"])
 
+# 화질 옵션
 quality = None
 if download_type in ["🎞️ 영상만", "🎥 영상 + 소리"]:
     quality = st.selectbox("화질 선택", ["1080p", "720p", "480p", "360p", "자동"])
 
+# yt-dlp 명령어 생성 함수
 def get_ytdlp_cmd(url, dtype, quality, uid):
     base_cmd = ["yt-dlp", "-o", f"yt_{uid}.%(ext)s", url]
 
@@ -43,15 +47,17 @@ def get_ytdlp_cmd(url, dtype, quality, uid):
     base_cmd += ["--merge-output-format", "mp4", "--no-warnings", "--no-playlist"]
     return base_cmd
 
+# 영상 정보 가져오기
 def get_video_info(url):
     cmd = ["yt-dlp", "--skip-download", "--print", "%(title)s||%(thumbnail)s||%(duration_string)s", url]
     try:
         output = subprocess.check_output(cmd, text=True).strip()
         title, thumbnail, duration = output.split("||")
         return {"title": title, "thumbnail": thumbnail, "duration": duration}
-    except Exception as e:
+    except:
         return None
 
+# URL 입력 시 처리
 if url_input:
     url = clean_url(url_input)
     info = get_video_info(url)
