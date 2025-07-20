@@ -11,43 +11,24 @@ url = st.text_input("YouTube 영상 링크 입력")
 
 download_type = st.radio("다운로드 방식 선택", ("영상+소리", "영상만", "소리만"))
 
-def get_available_qualities(url, download_type):
-    ydl_opts = {'quiet': True, 'skip_download': True}
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-    formats = info.get('formats', [])
+quality_options = ["144p", "240p", "360p", "480p", "720p", "1080p"]
 
-    qualities = set()
-    if download_type == "소리만":
-        return []  # 화질 선택 숨김 처리
-    elif download_type == "영상만":
-        for f in formats:
-            if f.get('vcodec') != 'none' and f.get('acodec') == 'none' and f.get('ext') == 'mp4':
-                height = f.get('height')
-                if height:
-                    qualities.add(f"{height}p")
-    else:
-        for f in formats:
-            if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('ext') == 'mp4':
-                height = f.get('height')
-                if height:
-                    qualities.add(f"{height}p")
+if download_type == "소리만":
+    quality = None
+else:
+    quality = st.selectbox("해상도 선택", quality_options)
 
-    qualities = list(qualities)
-    qualities.sort(key=lambda x: int(x.replace('p','')))
-    return qualities
-
-quality = None
 if url:
-    qualities = get_available_qualities(url, download_type)
-    if download_type != "소리만":
-        if qualities:
-            quality = st.selectbox("해상도 선택", qualities)
-        else:
-            st.warning("지원하는 해상도가 없습니다.")
-            quality = None
+    with st.spinner("영상 정보 불러오는 중..."):
+        try:
+            ydl_opts_info = {'quiet': True, 'skip_download': True}
+            with YoutubeDL(ydl_opts_info) as ydl:
+                info = ydl.extract_info(url, download=False)
+            st.video(info["url"], format="video/mp4")
+        except Exception:
+            st.error("❌ 영상 정보를 불러오지 못했습니다.")
+            st.stop()
 
-if url and (download_type == "소리만" or quality):
     if st.button("다운로드 시작"):
         with tempfile.TemporaryDirectory() as tmpdir:
             start_time = time.time()
@@ -68,27 +49,51 @@ if url and (download_type == "소리만" or quality):
                     progress_bar.progress(1.0)
                     status_placeholder.text("✅ 다운로드 완료!")
 
-            ydl_opts = {'outtmpl': os.path.join(tmpdir, '%(title)s.%(ext)s'), 'quiet': True, 'progress_hooks': [progress_hook]}
-
             if download_type == "소리만":
-                ydl_opts.update({
+                ydl_opts = {
                     'format': 'bestaudio',
+                    'outtmpl': os.path.join(tmpdir, '%(title)s.%(ext)s'),
+                    'quiet': True,
+                    'progress_hooks': [progress_hook],
                     'postprocessors': [{
                         'key': 'FFmpegExtractAudio',
                         'preferredcodec': 'mp3',
                         'preferredquality': '192',
-                    }],
-                })
+                    }]
+                }
             elif download_type == "영상만":
-                ydl_opts['format'] = f'bestvideo[height={int(quality.replace("p",""))}][ext=mp4]'
-            else:
-                ydl_opts['format'] = f'bestvideo[height={int(quality.replace("p",""))}]+bestaudio/best[height={int(quality.replace("p",""))}]'
+                res_map = {
+                    "144p": "160",
+                    "240p": "133",
+                    "360p": "134",
+                    "480p": "135",
+                    "720p": "136",
+                    "1080p": "137",
+                }
+                format_code = res_map.get(quality, "134")
+                ydl_opts = {
+                    'format': format_code,
+                    'outtmpl': os.path.join(tmpdir, '%(title)s.%(ext)s'),
+                    'quiet': True,
+                    'progress_hooks': [progress_hook],
+                }
+            else:  # 영상+소리
+                allowed_heights = ["144", "240", "360", "480"]
+                height_num = quality.replace("p","")
+                if height_num not in allowed_heights:
+                    height_num = "480"
+                # 단일 포맷으로 병합 없이 다운로드
+                ydl_opts = {
+                    'format': f'best[height<={height_num}][vcodec!=none][acodec!=none]/best',
+                    'outtmpl': os.path.join(tmpdir, '%(title)s.%(ext)s'),
+                    'quiet': True,
+                    'progress_hooks': [progress_hook],
+                }
 
             try:
                 with YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url)
                     filename = ydl.prepare_filename(info)
-                # 저장 경로 표시 제거했음
                 with open(filename, "rb") as f:
                     st.download_button("📥 파일 저장", f, file_name=os.path.basename(filename))
             except Exception as e:
