@@ -3,135 +3,173 @@ from yt_dlp import YoutubeDL
 import os
 import tempfile
 import time
-from threading import Thread
+import shutil
+import streamlit.components.v1 as components
+import urllib.parse
+import uuid
 
-st.set_page_config(page_title="YouTube 다운로드 웹앱", layout="wide")
+# 페이지 설정
+st.set_page_config(page_title="YouTube 다운로드", layout="wide")
+st.title("YouTube 재생목록 다운로드")
 
-def format_bytes(size):
-    # 바이트 단위 표시 포맷
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if size < 1024.0:
-            return f"{size:.2f} {unit}"
-        size /= 1024.0
-    return f"{size:.2f} TB"
+# 경고 스타일
+st.markdown("""
+    <style>
+        .warning {color: red; font-weight: bold;}
+    </style>
+""", unsafe_allow_html=True)
 
-def download_hook(d):
-    if d['status'] == 'downloading':
-        current = d.get('_percent_str', '').strip()
-        speed = d.get('_speed_str', '').strip()
-        eta = d.get('_eta_str', '').strip()
-        st.session_state['progress'] = {
-            'current': current,
-            'speed': speed,
-            'eta': eta
-        }
+# 입력
+url_input = st.text_input("YouTube 재생목록 링크를 입력하세요.", placeholder="https://www.youtube.com/playlist?list=...")
 
-def get_video_info(url):
-    ydl_opts = {'quiet': True, 'skip_download': True}
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-    return info
+# 목록 미리보기 기능
+show_list = False
+if st.button("🔍 목록 미리 확인"):
+    st.warning("목록을 불러오는 데 시간이 걸릴 수 있습니다.")
+    show_list = True
 
-def render_video_preview(url):
-    st.video(url)
+# 유일한 다운로드 디렉토리 생성
+def make_unique_download_dir(playlist_title="playlist"):
+    root = tempfile.gettempdir()
+    safe_title = "".join(c if c.isalnum() else "_" for c in playlist_title)
+    unique_id = str(uuid.uuid4())[:8]
+    path = os.path.join(root, f"{safe_title}_{unique_id}")
+    os.makedirs(path, exist_ok=True)
+    return path
 
-def download_video(url, mode, resolution, file_format, output_dir):
+# 영상 정보 가져오기
+def get_playlist_info(url):
     ydl_opts = {
         'quiet': True,
-        'progress_hooks': [download_hook],
-        'outtmpl': os.path.join(output_dir, '%(title)s.%(ext)s')
+        'extract_flat': True,
+        'skip_download': True,
+        'playlistend': 100  # 최대 100개까지만
+    }
+    with YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+        return info
+
+# 영상 개별 스트림 선택
+def get_streams(video_url, mode):
+    ydl_opts = {'quiet': True}
+    with YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(video_url, download=False)
+        formats = info.get('formats', [])
+
+    video_streams = []
+    audio_streams = []
+    for f in formats:
+        if f.get("vcodec") != "none" and f.get("acodec") == "none":
+            video_streams.append(f)
+        elif f.get("acodec") != "none" and f.get("vcodec") == "none":
+            audio_streams.append(f)
+        elif f.get("acodec") != "none" and f.get("vcodec") != "none":
+            if mode == "영상+소리":
+                video_streams.append(f)
+
+    if mode == "소리만":
+        return sorted(audio_streams, key=lambda x: x.get("abr", 0), reverse=True)
+    else:
+        return sorted(video_streams, key=lambda x: x.get("height", 0), reverse=True)
+
+# 미리보기
+def preview_player(video_url):
+    video_embed = f"""
+    <video width="100%" height="250" controls autoplay muted>
+        <source src="{video_url}" type="video/mp4">
+        Your browser does not support HTML5 video.
+    </video>
+    """
+    components.html(video_embed, height=270)
+
+# 다운로드
+def download_video(video_url, mode, resolution, path, ext, progress_callback):
+    ydl_opts = {
+        'quiet': True,
+        'outtmpl': os.path.join(path, f"%(title)s.%(ext)s"),
+        'format': f'bestvideo[height={resolution}]+bestaudio/best[height={resolution}]' if mode == "영상+소리" else
+                  f'bestvideo[height={resolution}]' if mode == "영상만" else
+                  'bestaudio/best',
+        'merge_output_format': 'mp4',
+        'progress_hooks': [progress_callback]
     }
 
-    if mode == 'video+audio':
-        ydl_opts['format'] = f'bestvideo[height<={resolution}]+bestaudio/best[height<={resolution}]'
-    elif mode == 'video':
-        ydl_opts['format'] = f'bestvideo[height<={resolution}]'
-    elif mode == 'audio':
-        ydl_opts['format'] = 'bestaudio'
-        ydl_opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3' if file_format == 'mp3' else 'm4a'
-        }]
-
     with YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
+        ydl.download([video_url])
 
-def playlist_info(playlist_url):
-    ydl_opts = {'quiet': True, 'extract_flat': True}
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(playlist_url, download=False)
-    return info
+# 다운로드 실행
+if url_input:
+    try:
+        playlist_info = get_playlist_info(url_input)
+        videos = playlist_info.get("entries", [])
+        playlist_title = playlist_info.get("title", "Playlist")
+        download_dir = make_unique_download_dir(playlist_title)
 
-st.title("YouTube 다운로드 웹앱")
+        if show_list:
+            st.subheader("재생목록 영상 선택")
+        selected_videos = []
 
-url = st.text_input("YouTube 링크를 입력하세요")
+        for i, v in enumerate(videos):
+            video_title = v.get("title")
+            video_url = v.get("url")
+            full_url = f"https://www.youtube.com/watch?v={video_url}"
 
-if url:
-    if "playlist" in url:
-        st.subheader("🔗 재생목록 처리")
-        if st.button("목록 미리 확인"):
-            st.warning("재생목록 확인은 시간이 오래 걸릴 수 있습니다.")
-            with st.spinner("재생목록 불러오는 중..."):
-                try:
-                    playlist = playlist_info(url)
-                    st.success(f"총 {len(playlist['entries'])}개 영상이 감지되었습니다.")
-                    for idx, video in enumerate(playlist['entries'], start=1):
-                        st.markdown(f"**{idx}.** [{video['title']}]({video['url']})")
-                except Exception as e:
-                    st.error(f"오류 발생: {str(e)}")
+            with st.expander(f"🎞 영상 {i+1}", expanded=show_list):
+                cols = st.columns([1, 2, 2, 2])
+                with cols[0]:
+                    preview_player(full_url)
 
-        if st.button("바로 다운로드"):
-            try:
-                with st.spinner("재생목록 다운로드 중..."):
-                    playlist = playlist_info(url)
-                    output_dir = tempfile.mkdtemp()
-                    for i, video in enumerate(playlist['entries']):
-                        st.markdown(f"**({i+1}/{len(playlist['entries'])}) 다운로드 중...**")
-                        download_video(video['url'], 'video+audio', '1080', 'mp4', output_dir)
-                    st.success(f"다운로드 완료! 폴더: {output_dir}")
-            except Exception as e:
-                st.error(f"다운로드 오류: {str(e)}")
+                with cols[1]:
+                    mode = st.selectbox(f"다운로드 방식 ({i+1})", ["영상+소리", "영상만", "소리만"], key=f"mode_{i}")
 
-    else:
-        st.subheader("🎬 단일 영상 다운로드")
+                with cols[2]:
+                    if mode == "소리만":
+                        resolution = "audio"
+                        ext = "mp3"
+                        st.markdown("🔈 최고 음질")
+                    else:
+                        streams = get_streams(full_url, mode)
+                        options = [str(f.get("height")) for f in streams if "height" in f]
+                        resolution = st.selectbox("해상도 선택", options, key=f"res_{i}")
+                        ext = "mp4"
 
-        try:
-            info = get_video_info(url)
-            render_video_preview(info['webpage_url'])
+                with cols[3]:
+                    download = st.checkbox("✅ 선택", key=f"check_{i}")
+                    if download:
+                        selected_videos.append({
+                            "url": full_url,
+                            "mode": mode,
+                            "resolution": resolution,
+                            "ext": ext,
+                            "title": video_title
+                        })
 
-            mode = st.radio("다운로드 방식 선택", ['video+audio', 'video', 'audio'])
-            if mode == 'audio':
-                file_format = st.selectbox("파일 형식", ['mp3', 'm4a'])
-                resolution = None
-            else:
-                resolution = st.selectbox("해상도", ['2160', '1440', '1080', '720', '480', '360', '240'])
-                file_format = 'mp4'
+        if selected_videos:
+            if st.button("⬇️ 바로 다운로드"):
+                for idx, vid in enumerate(selected_videos):
+                    st.write(f"🎬 영상 {idx+1} 다운로드 중...")
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    start_time = time.time()
 
-            if st.button("다운로드 시작"):
-                st.session_state['progress'] = {}
-                output_dir = tempfile.mkdtemp()
+                    def progress_hook(d):
+                        if d['status'] == 'downloading':
+                            total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate')
+                            downloaded = d.get('downloaded_bytes', 0)
+                            if total_bytes:
+                                percent = downloaded / total_bytes
+                                progress_bar.progress(min(percent, 1.0))
+                                elapsed = time.time() - start_time
+                                if percent > 0:
+                                    est = (elapsed / percent) - elapsed
+                                    status_text.text(f"진행률: {percent*100:.2f}% | 예상 시간: {est:.1f}초")
+                        elif d['status'] == 'finished':
+                            progress_bar.progress(100)
+                            status_text.text("완료!")
 
-                def run_download():
-                    download_video(url, mode, resolution, file_format, output_dir)
+                    download_video(vid["url"], vid["mode"], vid["resolution"], download_dir, vid["ext"], progress_hook)
 
-                thread = Thread(target=run_download)
-                thread.start()
+                st.success(f"✅ 모든 다운로드 완료!\n\n📁 저장 경로: `{download_dir}`")
 
-                progress_bar = st.progress(0)
-                while thread.is_alive():
-                    prog = st.session_state.get('progress', {})
-                    percent_str = prog.get('current', '0%').replace('%', '')
-                    try:
-                        percent = float(percent_str) / 100
-                        progress_bar.progress(min(max(percent, 0.0), 1.0))
-                        st.write(
-                            f"진행률: {prog.get('current', '?')} / 속도: {prog.get('speed', '?')} / 남은 시간: {prog.get('eta', '?')}초")
-                    except:
-                        pass
-                    time.sleep(1)
-
-                thread.join()
-                st.success(f"다운로드 완료! 저장 폴더: {output_dir}")
-
-        except Exception as e:
-            st.error(f"영상 정보 불러오기 오류: {str(e)}")
+    except Exception as e:
+        st.error(f"❌ 오류 발생: {e}")
