@@ -117,3 +117,35 @@ if url:
                     }
 
         if st.button("전체 다운로드 시작"):
+            st.write("🚀 다운로드 중...")
+
+            for key, val in selection.items():
+                download_with_progress(val['entry'], val['type'], val['res'], val['ext'], output_dir, val['status_slot'])
+
+            st.success("🎉 모든 영상 다운로드 완료!")
+            st.code(f"저장 경로: {output_dir}")
+
+    else:
+        st.subheader("🎥 단일 영상 다운로드")
+
+        video_info = get_video_info(url)
+        temp_dir = tempfile.mkdtemp()
+        output_dir = os.path.join(temp_dir, "SingleVideo")
+        os.makedirs(output_dir, exist_ok=True)
+
+        st.video(url)
+
+        download_type = st.selectbox("다운로드 방식", ["video+audio", "video", "audio"])
+
+        if download_type == 'audio':
+            resolution = 'audio_only'
+            ext = 'mp3'
+        else:
+            resolution = st.selectbox("해상도 선택", ["2160", "1440", "1080", "720", "480", "360", "240", "144"])
+            ext = 'mp4'
+
+        slot = st.empty()
+        if st.button("영상 다운로드"):
+            st.write("🚀 다운로드 시작!")
+            download_with_progress(video_info, download_type, resolution, ext, output_dir, slot)
+            st.code(f"저장 경로: {output_dir}")
