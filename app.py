@@ -32,7 +32,8 @@ if url:
     if st.button("다운로드 시작"):
         with tempfile.TemporaryDirectory() as tmpdir:
             start_time = time.time()
-            st.info("⏳ 다운로드 준비 중...")
+            status_placeholder = st.empty()
+            progress_bar = st.progress(0)
 
             def progress_hook(d):
                 if d["status"] == "downloading":
@@ -42,14 +43,16 @@ if url:
                     elapsed = time.time() - start_time
                     speed = downloaded_bytes / elapsed if elapsed > 0 else 0
                     eta = (total_bytes - downloaded_bytes) / speed if speed > 0 else 0
-                    st.progress(min(percent, 1.0), text=f"{percent*100:.1f}% | 예상 시간: {int(eta)}초")
+                    progress_bar.progress(min(percent, 1.0))
+                    status_placeholder.text(f"다운로드 진행률: {percent*100:.1f}% | 예상 시간: {int(eta)}초")
                 elif d["status"] == "finished":
-                    st.success("✅ 다운로드 완료!")
+                    progress_bar.progress(1.0)
+                    status_placeholder.text("✅ 다운로드 완료!")
 
             if download_type == "소리만":
                 ydl_opts = {
                     'format': 'bestaudio',
-                    'outtmpl': os.path.join(tmpdir, '%(id)s.%(ext)s'),
+                    'outtmpl': os.path.join(tmpdir, '%(title)s.%(ext)s'),
                     'quiet': True,
                     'progress_hooks': [progress_hook],
                     'postprocessors': [{
@@ -70,20 +73,19 @@ if url:
                 format_code = res_map.get(quality, "134")
                 ydl_opts = {
                     'format': format_code,
-                    'outtmpl': os.path.join(tmpdir, '%(id)s.%(ext)s'),
+                    'outtmpl': os.path.join(tmpdir, '%(title)s.%(ext)s'),
                     'quiet': True,
                     'progress_hooks': [progress_hook],
                 }
             else:  # 영상+소리
-                # 병합 필요 없는 480p 이하 포맷으로 제한
                 allowed_heights = ["144", "240", "360", "480"]
                 height_num = quality.replace("p","")
                 if height_num not in allowed_heights:
-                    height_num = "480"  # 기본 480p 제한
+                    height_num = "480"
 
                 ydl_opts = {
                     'format': f'best[height<={height_num}][vcodec!=none][acodec!=none]/best',
-                    'outtmpl': os.path.join(tmpdir, '%(id)s.%(ext)s'),
+                    'outtmpl': os.path.join(tmpdir, '%(title)s.%(ext)s'),
                     'quiet': True,
                     'progress_hooks': [progress_hook],
                 }
@@ -91,15 +93,9 @@ if url:
             try:
                 with YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url)
-                    video_id = info.get("id")
-                    ext = info.get("ext")
-                    file_path = os.path.join(tmpdir, f"{video_id}.{ext}")
-                    if not os.path.exists(file_path):
-                        st.error("❌ 다운로드된 파일을 찾을 수 없습니다.")
-                        st.stop()
-                st.success("🎉 다운로드 성공!")
-                st.markdown(f"🗂️ **저장 경로:** `{file_path}`")
-                with open(file_path, "rb") as f:
-                    st.download_button("📥 파일 저장", f, file_name=f"{video_id}.{ext}")
+                    filename = ydl.prepare_filename(info)
+                st.markdown(f"🗂️ **저장 경로:** `{filename}`")
+                with open(filename, "rb") as f:
+                    st.download_button("📥 파일 저장", f, file_name=os.path.basename(filename))
             except Exception as e:
                 st.error(f"❌ 오류 발생: {e}")
