@@ -1,114 +1,105 @@
 import streamlit as st
-import subprocess
-import os
-import uuid
-import time
 from yt_dlp import YoutubeDL
-import threading
+import os
+import tempfile
+import time
 
-# 다운로드 폴더
-DOWNLOAD_DIR = "downloads"
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+st.set_page_config(page_title="YouTube 다운로더", layout="centered")
+st.title("YouTube 영상 다운로드 웹앱")
 
-st.set_page_config(page_title="YouTube Downloader", layout="centered")
+url = st.text_input("YouTube 영상 링크 입력")
 
-st.markdown("## 🎬 YouTube Downloader (yt_dlp 기반)")
-url = st.text_input("YouTube 영상 URL을 입력하세요")
+download_type = st.radio("다운로드 방식 선택", ("영상+소리", "영상만", "소리만"))
 
-download_type = st.selectbox("다운로드 방식 선택", ["영상 + 소리", "영상만", "소리만"])
-ext_default = "mp4" if download_type != "소리만" else "mp3"
-file_ext = st.selectbox("저장 확장자", ["mp4", "webm", "mkv", "mp3"], index=["mp4", "webm", "mkv", "mp3"].index(ext_default))
+quality_options = ["144p", "240p", "360p", "480p", "720p", "1080p"]
 
-quality = None
-if download_type != "소리만":
-    quality = st.selectbox("해상도 선택", ["1080p", "720p", "480p", "360p"])
+if download_type == "소리만":
+    quality = None
+else:
+    quality = st.selectbox("해상도 선택", quality_options)
 
 if url:
-    st.video(url, format="video/mp4")
+    with st.spinner("영상 정보 불러오는 중..."):
+        try:
+            ydl_opts_info = {'quiet': True, 'skip_download': True}
+            with YoutubeDL(ydl_opts_info) as ydl:
+                info = ydl.extract_info(url, download=False)
+            st.video(info["url"], format="video/mp4")
+        except Exception:
+            st.error("❌ 영상 정보를 불러오지 못했습니다.")
+            st.stop()
 
     if st.button("다운로드 시작"):
-        progress_text = st.empty()
-        progress_bar = st.progress(0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            start_time = time.time()
+            st.info("⏳ 다운로드 준비 중...")
 
-        def download():
+            def progress_hook(d):
+                if d["status"] == "downloading":
+                    total_bytes = d.get("total_bytes") or d.get("total_bytes_estimate")
+                    downloaded_bytes = d.get("downloaded_bytes", 0)
+                    percent = downloaded_bytes / total_bytes if total_bytes else 0
+                    elapsed = time.time() - start_time
+                    speed = downloaded_bytes / elapsed if elapsed > 0 else 0
+                    eta = (total_bytes - downloaded_bytes) / speed if speed > 0 else 0
+                    st.progress(min(percent, 1.0), text=f"{percent*100:.1f}% | 예상 시간: {int(eta)}초")
+                elif d["status"] == "finished":
+                    st.success("✅ 다운로드 완료!")
+
+            if download_type == "소리만":
+                ydl_opts = {
+                    'format': 'bestaudio',
+                    'outtmpl': os.path.join(tmpdir, '%(id)s.%(ext)s'),
+                    'quiet': True,
+                    'progress_hooks': [progress_hook],
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'mp3',
+                        'preferredquality': '192',
+                    }]
+                }
+            elif download_type == "영상만":
+                res_map = {
+                    "144p": "160",
+                    "240p": "133",
+                    "360p": "134",
+                    "480p": "135",
+                    "720p": "136",
+                    "1080p": "137",
+                }
+                format_code = res_map.get(quality, "134")
+                ydl_opts = {
+                    'format': format_code,
+                    'outtmpl': os.path.join(tmpdir, '%(id)s.%(ext)s'),
+                    'quiet': True,
+                    'progress_hooks': [progress_hook],
+                }
+            else:  # 영상+소리
+                # 병합 필요 없는 480p 이하 포맷으로 제한
+                allowed_heights = ["144", "240", "360", "480"]
+                height_num = quality.replace("p","")
+                if height_num not in allowed_heights:
+                    height_num = "480"  # 기본 480p 제한
+
+                ydl_opts = {
+                    'format': f'best[height<={height_num}][vcodec!=none][acodec!=none]/best',
+                    'outtmpl': os.path.join(tmpdir, '%(id)s.%(ext)s'),
+                    'quiet': True,
+                    'progress_hooks': [progress_hook],
+                }
+
             try:
-                temp_id = str(uuid.uuid4())
-                output_template = os.path.join(DOWNLOAD_DIR, f"{temp_id}.%(ext)s")
-                
-                # 형식 조건
-                if download_type == "소리만":
-                    ydl_opts = {
-                        'format': 'bestaudio/best',
-                        'outtmpl': output_template,
-                        'postprocessors': [{
-                            'key': 'FFmpegExtractAudio',
-                            'preferredcodec': file_ext,
-                        }],
-                        'noplaylist': True,
-                        'quiet': True,
-                        'progress_hooks': [progress_hook],
-                        'merge_output_format': None
-                    }
-                elif download_type == "영상만":
-                    res_map = {"1080p": "bestvideo[height<=1080]", "720p": "bestvideo[height<=720]", "480p": "bestvideo[height<=480]", "360p": "bestvideo[height<=360]"}
-                    ydl_opts = {
-                        'format': res_map[quality],
-                        'outtmpl': output_template,
-                        'noplaylist': True,
-                        'quiet': True,
-                        'progress_hooks': [progress_hook],
-                        'merge_output_format': None
-                    }
-                else:  # 영상 + 소리
-                    res_map = {"1080p": "bestvideo[height<=1080]+bestaudio", "720p": "bestvideo[height<=720]+bestaudio", "480p": "bestvideo[height<=480]+bestaudio", "360p": "bestvideo[height<=360]+bestaudio"}
-                    ydl_opts = {
-                        'format': res_map[quality],
-                        'outtmpl': output_template,
-                        'noplaylist': True,
-                        'quiet': True,
-                        'progress_hooks': [progress_hook],
-                        'merge_output_format': None
-                    }
-
-                # 다운로드 시간 측정
-                start_time = time.time()
                 with YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([url])
-                elapsed = time.time() - start_time
-
-                # 실제 파일 경로 탐색
-                for f in os.listdir(DOWNLOAD_DIR):
-                    if f.startswith(temp_id):
-                        file_path = os.path.join(DOWNLOAD_DIR, f)
-                        break
-
-                progress_bar.progress(100)
-                progress_text.markdown(f"✅ **다운로드 완료!** 파일 경로: `{file_path}` (소요시간: {int(elapsed)}초)")
-
-                with open(file_path, "rb") as file:
-                    st.download_button(
-                        label="📥 파일 저장하기",
-                        data=file,
-                        file_name=os.path.basename(file_path),
-                        mime="application/octet-stream"
-                    )
-
+                    info = ydl.extract_info(url)
+                    video_id = info.get("id")
+                    ext = info.get("ext")
+                    file_path = os.path.join(tmpdir, f"{video_id}.{ext}")
+                    if not os.path.exists(file_path):
+                        st.error("❌ 다운로드된 파일을 찾을 수 없습니다.")
+                        st.stop()
+                st.success("🎉 다운로드 성공!")
+                st.markdown(f"🗂️ **저장 경로:** `{file_path}`")
+                with open(file_path, "rb") as f:
+                    st.download_button("📥 파일 저장", f, file_name=f"{video_id}.{ext}")
             except Exception as e:
-                progress_text.error(f"❌ 오류 발생: {e}")
-
-        # 진행률 갱신
-        def progress_hook(d):
-            if d['status'] == 'downloading':
-                total = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
-                downloaded = d.get('downloaded_bytes', 0)
-                if total > 0:
-                    percent = int(downloaded / total * 100)
-                    eta = d.get('eta', '?')
-                    progress_bar.progress(percent)
-                    progress_text.markdown(f"🔄 진행 중: **{percent}%**, 예상 남은 시간: **{eta}초**")
-            elif d['status'] == 'finished':
-                progress_bar.progress(100)
-                progress_text.markdown("🛠️ 다운로드 준비 완료...")
-
-        # 다운로드 시작 (스레드 분리로 UI 멈춤 방지)
-        threading.Thread(target=download).start()
+                st.error(f"❌ 오류 발생: {e}")
