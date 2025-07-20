@@ -26,12 +26,21 @@ def fetch_playlist_urls(playlist_url):
 def fetch_metadata(url):
     try:
         yt = YouTube(url)
-        resolutions = list({s.resolution for s in yt.streams.filter(progressive=True, file_extension='mp4') if s.resolution})
-        resolutions.sort(reverse=True)
+        # 지원 해상도는 progressive(영상+소리)만 필터링 후 추출
+        progressive_resolutions = [s.resolution for s in yt.streams.filter(progressive=True, file_extension='mp4') if s.resolution]
+        # 영상만 스트림 해상도
+        video_only_resolutions = [s.resolution for s in yt.streams.filter(only_video=True, file_extension='mp4') if s.resolution]
+        # 소리만은 해상도 상관없음
+        resolutions = list(set(progressive_resolutions + video_only_resolutions))
+        resolutions = [r for r in resolutions if r is not None]
+        resolutions.sort(key=lambda x: int(x.replace('p','')), reverse=True)
+
         return {
             "title": yt.title,
             "length": yt.length,
             "thumbnail_url": yt.thumbnail_url,
+            "progressive_res": progressive_resolutions,
+            "video_only_res": video_only_resolutions,
             "resolutions": resolutions,
             "yt": yt
         }
@@ -47,24 +56,25 @@ def get_thumbnail(url):
 
 def download_video(yt, resolution, format_type, progress_callback):
     try:
+        stream = None
         if format_type == "영상+소리":
+            # progressive 스트림 중에서 원하는 해상도
             stream = yt.streams.filter(progressive=True, file_extension='mp4', res=resolution).first()
         elif format_type == "영상만":
+            # 영상만 스트림 중 원하는 해상도
             stream = yt.streams.filter(only_video=True, file_extension='mp4', res=resolution).first()
         elif format_type == "소리만":
-            stream = yt.streams.filter(only_audio=True).first()
-        else:
-            return False, "형식 오류"
-
+            # 음성만 스트림 중 최고 비트레이트로 선택
+            stream = yt.streams.filter(only_audio=True).order_by('abr').desc().first()
         if not stream:
-            return False, "선택한 해상도 없음"
+            return False, "선택한 해상도 또는 형식이 지원되지 않습니다."
 
         total = stream.filesize or 1
         downloaded = 0
 
-        def progress_func(stream, chunk, remaining):
+        def progress_func(stream, chunk, bytes_remaining):
             nonlocal downloaded
-            downloaded = total - remaining
+            downloaded = total - bytes_remaining
             percent = int(downloaded / total * 100)
             progress_callback(percent)
 
@@ -77,7 +87,7 @@ def download_video(yt, resolution, format_type, progress_callback):
     except Exception as e:
         return False, str(e)
 
-# 👉 입력창
+# 입력창
 playlist_url = st.text_input("🔗 유튜브 재생목록 URL 입력", "")
 
 if playlist_url:
@@ -101,11 +111,19 @@ if playlist_url:
     with col1:
         global_format = st.selectbox("전체 다운로드 형식", FORMAT_OPTIONS)
     with col2:
-        common_res = list({res for v in video_data for res in v['resolutions']})
-        common_res.sort(reverse=True)
-        global_res = st.selectbox("전체 해상도 선택", common_res)
+        # 모든 영상에서 지원하는 해상도 교집합으로 처리
+        if video_data:
+            common_res = set(video_data[0]["resolutions"])
+            for v in video_data[1:]:
+                common_res &= set(v["resolutions"])
+            common_res = sorted(common_res, key=lambda x: int(x.replace('p','')), reverse=True)
+        else:
+            common_res = []
+        if common_res:
+            global_res = st.selectbox("전체 해상도 선택", common_res)
+        else:
+            global_res = None
 
-    # 개별 목록
     st.divider()
     st.subheader("📂 영상 목록")
 
@@ -114,55 +132,79 @@ if playlist_url:
     lock = threading.Lock()
 
     for i, v in enumerate(video_data):
-        with st.container(border=True):
-            cols = st.columns([1, 3, 2, 2, 2])
+        with st.container():
+            cols = st.columns([1, 4, 2, 2, 2, 2])
             with cols[0]:
                 thumb = get_thumbnail(v["thumbnail_url"])
                 if thumb:
-                    st.image(thumb.resize((90, 60)))
+                    st.image(thumb.resize((120, 80)))
             with cols[1]:
                 st.markdown(f"**{v['title']}**")
                 mins, secs = divmod(v["length"], 60)
                 st.caption(f"⏱️ {mins}분 {secs}초")
             with cols[2]:
-                selected_format = st.selectbox(f"형식 {i+1}", FORMAT_OPTIONS, key=f"format_{i}")
+                selected_format = st.selectbox(f"형식 {i+1}", FORMAT_OPTIONS, index=FORMAT_OPTIONS.index(global_format), key=f"format_{i}")
             with cols[3]:
                 available_res = v["resolutions"]
-                default_res = global_res if global_res in available_res else available_res[0]
-                selected_res = st.selectbox(f"해상도 {i+1}", available_res, index=available_res.index(default_res), key=f"res_{i}")
+                # 고화질 지원 안되는 해상도는 선택 불가 처리
+                def res_disabled(res):
+                    # 영상+소리 형식은 progressive_res에 있어야함
+                    if selected_format == "영상+소리":
+                        return res not in v["progressive_res"]
+                    # 영상만은 video_only_res에 있어야함
+                    elif selected_format == "영상만":
+                        return res not in v["video_only_res"]
+                    # 소리만은 해상도 상관없음 항상 False
+                    else:
+                        return False
+                options = [(r, res_disabled(r)) for r in available_res]
+                # 선택 기본값: global_res 있으면 그걸로, 없으면 첫번째
+                default_res = global_res if global_res in available_res else (available_res[0] if available_res else None)
+                selected_res = st.selectbox(
+                    f"해상도 {i+1}",
+                    [r for r,_ in options],
+                    index=[r for r,_ in options].index(default_res) if default_res else 0,
+                    key=f"res_{i}",
+                    disabled=[d for _,d in options]
+                )
             with cols[4]:
                 if st.button("⬇️ 다운로드", key=f"btn_{i}"):
                     def update_progress(p):
                         with lock:
                             status_states[i] = ("⏬ 다운로드 중", p)
                     thread = threading.Thread(
-                        target=lambda: (
-                            download_video(v["yt"], selected_res, selected_format, update_progress),
-                            status_states.__setitem__(i, ("✅ 완료", 100))
+                        target=lambda idx=i, fmt=selected_format, res=selected_res: (
+                            download_video(video_data[idx]["yt"], res, fmt, lambda p: update_progress(p)),
+                            status_states.__setitem__(idx, ("✅ 완료", 100))
                         )
                     )
                     threads.append(thread)
                     thread.start()
-
-            # 진행도 표시
-            label, perc = status_states[i]
-            st.progress(perc / 100, text=f"{label} ({perc}%)")
+            with cols[5]:
+                label, perc = status_states[i]
+                st.progress(perc / 100, text=f"{label} ({perc}%)")
 
     st.divider()
 
     # 전체 다운로드 버튼
     if st.button("📥 전체 다운로드 시작"):
         for i, v in enumerate(video_data):
-            selected_format = global_format
-            selected_res = global_res if global_res in v["resolutions"] else v["resolutions"][0]
+            fmt = global_format
+            # 개별 영상 해상도 지원여부 체크 후 fallback
+            if global_res and global_res in v["resolutions"]:
+                res = global_res
+            elif v["resolutions"]:
+                res = v["resolutions"][0]
+            else:
+                res = None
 
             def update_progress(p, index=i):
                 with lock:
                     status_states[index] = ("⏬ 다운로드 중", p)
 
             thread = threading.Thread(
-                target=lambda idx=i: (
-                    download_video(v["yt"], selected_res, selected_format, lambda p: update_progress(p, idx)),
+                target=lambda idx=i, fmt=fmt, res=res: (
+                    download_video(video_data[idx]["yt"], res, fmt, lambda p: update_progress(p, idx)),
                     status_states.__setitem__(idx, ("✅ 완료", 100))
                 )
             )
