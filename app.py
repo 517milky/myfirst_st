@@ -1,149 +1,119 @@
 import streamlit as st
 import yt_dlp
-import tempfile
 import os
+import tempfile
 import time
-import shutil
+import threading
 from urllib.parse import urlparse, parse_qs
-import streamlit.components.v1 as components
+import shutil
 
-st.set_page_config(page_title="YouTube 다운로드 웹앱", layout="wide")
+st.set_page_config(page_title="YouTube Downloader", layout="wide")
 
 def is_playlist(url):
-    parsed_url = urlparse(url)
-    query = parse_qs(parsed_url.query)
-    return 'list' in query and 'watch' not in parsed_url.path
+    query = parse_qs(urlparse(url).query)
+    return 'list' in query
+
+def format_bytes(bytes):
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if bytes < 1024:
+            return f"{bytes:.2f} {unit}"
+        bytes /= 1024
+    return f"{bytes:.2f} TB"
 
 def get_video_info(url):
-    ydl_opts = {'quiet': True, 'skip_download': True}
+    ydl_opts = {'quiet': True, 'extract_flat': True, 'force_generic_extractor': True}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         return ydl.extract_info(url, download=False)
 
-def get_formats(info, audio_only=False):
-    formats = []
-    for f in info['formats']:
-        if audio_only:
-            if f.get('vcodec') == 'none' and f.get('acodec') != 'none':
-                formats.append(f)
-        else:
-            if f.get('vcodec') != 'none':
-                formats.append(f)
-    return sorted(formats, key=lambda x: x.get('height', 0), reverse=True)
-
-def show_video_preview(url):
-    st.video(url)
-
-def estimate_time(size_bytes, speed_bytes_per_sec):
-    if speed_bytes_per_sec == 0:
-        return "예상 불가"
-    seconds = size_bytes / speed_bytes_per_sec
-    return f"{int(seconds)}초"
-
-def download_video(url, format_id, ext, progress_callback):
+def download_video(entry, download_type, resolution, output_dir, ext, progress_callback):
     ydl_opts = {
-        'format': format_id,
-        'outtmpl': os.path.join(tempfile.gettempdir(), '%(title)s.%(ext)s'),
-        'merge_output_format': ext,
+        'format': 'best',
+        'outtmpl': os.path.join(output_dir, '%(title)s.%(ext)s'),
+        'noplaylist': True,
         'progress_hooks': [progress_callback],
         'quiet': True,
+        'merge_output_format': ext,
     }
+
+    if download_type == 'video+audio':
+        ydl_opts['format'] = f'bestvideo[ext=mp4][height<={resolution}]+bestaudio[ext=m4a]/best[ext=mp4]'
+    elif download_type == 'video':
+        ydl_opts['format'] = f'bestvideo[ext=mp4][height<={resolution}]'
+    elif download_type == 'audio':
+        ydl_opts['format'] = 'bestaudio[ext=m4a]'
+        ydl_opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }]
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.download([url])
-        return info
+        ydl.download([entry['url']])
 
-st.title("YouTube 영상 / 재생목록 다운로드")
+def download_with_progress(entry, download_type, resolution, ext, output_dir, slot):
+    bytes_downloaded = 0
+    total_bytes = 0
+    start_time = time.time()
 
-url = st.text_input("YouTube 링크 입력", placeholder="https://...")
+    def progress_hook(d):
+        nonlocal bytes_downloaded, total_bytes
+        if d['status'] == 'downloading':
+            bytes_downloaded = d.get('downloaded_bytes', 0)
+            total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate', 0)
+            elapsed = time.time() - start_time
+            speed = bytes_downloaded / elapsed if elapsed > 0 else 0
+            percent = (bytes_downloaded / total_bytes) * 100 if total_bytes else 0
+            remaining = (total_bytes - bytes_downloaded) / speed if speed > 0 else 0
+            slot.progress(percent / 100)
+            slot.text(f"{percent:.1f}% • {format_bytes(bytes_downloaded)} / {format_bytes(total_bytes)} • 남은 시간: {remaining:.1f}초")
+
+    try:
+        download_video(entry, download_type, resolution, output_dir, ext, progress_hook)
+        slot.text("✅ 다운로드 완료")
+    except Exception as e:
+        slot.text(f"❌ 실패: {str(e)}")
+
+st.title("YouTube Downloader")
+
+url = st.text_input("YouTube 영상 또는 재생목록 URL을 입력하세요:")
 
 if url:
-    playlist_mode = is_playlist(url)
-    st.success("재생목록입니다." if playlist_mode else "단일 영상입니다.")
-    
-    info = get_video_info(url)
+    if is_playlist(url):
+        st.subheader("🎞️ 재생목록 영상들")
 
-    if playlist_mode:
-        entries = info.get('entries', [])
-        selected_videos = st.multiselect(
-            "다운로드할 영상을 선택하세요:",
-            options=[(i, v['title']) for i, v in enumerate(entries)],
-            format_func=lambda x: entries[x[0]]['title']
-        )
+        info = get_video_info(url)
+        videos = info.get('entries', [])
+        temp_dir = tempfile.mkdtemp()
+        folder_name = info.get('title') or 'YouTubePlaylist'
+        output_dir = os.path.join(temp_dir, folder_name)
+        os.makedirs(output_dir, exist_ok=True)
 
-        if selected_videos:
-            with st.spinner("다운로드 준비 중..."):
-                for idx, _ in selected_videos:
-                    video = entries[idx]
-                    show_video_preview(video['webpage_url'])
-                    subcol1, subcol2 = st.columns([3, 1])
-                    with subcol1:
-                        download_type = st.selectbox(f"{video['title']} - 다운로드 방식", ['영상+소리', '영상만', '소리만'], key=video['id'])
-                        formats = get_formats(video, audio_only=(download_type == '소리만'))
+        selection = {}
+        st.caption("아래에서 개별 영상마다 다운로드 방식 및 화질을 선택할 수 있습니다.")
+        for i, video in enumerate(videos):
+            with st.expander(f"{i+1}. {video['title']}", expanded=False):
+                col1, col2 = st.columns([2, 3])
+                with col1:
+                    st.video(f"https://www.youtube.com/watch?v={video['id']}")
+                with col2:
+                    download_type = st.selectbox(
+                        f"다운로드 방식 ({video['title'][:15]}...)", 
+                        ["video+audio", "video", "audio"], key=f"type_{i}"
+                    )
 
-                        if download_type != '소리만':
-                            res_options = [f"{f['height']}p" for f in formats if 'height' in f]
-                            chosen = st.selectbox("해상도 선택", res_options, key="res_"+video['id'])
-                            selected_format = next((f for f in formats if f.get('height') and f"{f['height']}p" == chosen), formats[0])
-                        else:
-                            selected_format = formats[0]
+                    if download_type == 'audio':
+                        resolution = 'audio_only'
+                        ext = 'mp3'
+                    else:
+                        resolution = st.selectbox("해상도 선택", ["2160", "1440", "1080", "720", "480", "360", "240", "144"], key=f"res_{i}")
+                        ext = 'mp4'
 
-                        ext = 'mp3' if download_type == '소리만' else 'mp4'
-                        st.write(f"선택한 확장자: `{ext}`")
+                    selection[video['url']] = {
+                        'entry': video,
+                        'type': download_type,
+                        'res': resolution,
+                        'ext': ext,
+                        'status_slot': st.empty()
+                    }
 
-                    with subcol2:
-                        download_btn = st.button("다운로드", key="dl_"+video['id'])
-                        if download_btn:
-                            progress = st.progress(0)
-                            status = st.empty()
-                            bytes_downloaded = 0
-                            total_bytes = selected_format.get('filesize', 1)
-
-                            def hook(d):
-                                nonlocal bytes_downloaded, total_bytes
-                                if d['status'] == 'downloading':
-                                    bytes_downloaded = d.get('downloaded_bytes', 0)
-                                    total_bytes = d.get('total_bytes', 1)
-                                    percent = int(bytes_downloaded / total_bytes * 100)
-                                    progress.progress(min(percent, 100))
-                                    eta = estimate_time(total_bytes, d.get('speed', 1))
-                                    status.text(f"{percent}% | 예상 소요 시간: {eta}")
-
-                                if d['status'] == 'finished':
-                                    status.text("다운로드 완료!")
-
-                            download_video(video['webpage_url'], selected_format['format_id'], ext, hook)
-    else:
-        show_video_preview(info['webpage_url'])
-
-        download_type = st.radio("다운로드 방식", ['영상+소리', '영상만', '소리만'])
-        formats = get_formats(info, audio_only=(download_type == '소리만'))
-
-        if download_type != '소리만':
-            res_options = [f"{f['height']}p" for f in formats if 'height' in f]
-            chosen = st.selectbox("해상도 선택", res_options)
-            selected_format = next((f for f in formats if f.get('height') and f"{f['height']}p" == chosen), formats[0])
-        else:
-            selected_format = formats[0]
-
-        ext = 'mp3' if download_type == '소리만' else 'mp4'
-        st.write(f"다운로드 확장자: `{ext}`")
-
-        if st.button("다운로드 시작"):
-            progress = st.progress(0)
-            status = st.empty()
-            bytes_downloaded = 0
-            total_bytes = selected_format.get('filesize', 1)
-
-            def hook(d):
-                nonlocal bytes_downloaded, total_bytes
-                if d['status'] == 'downloading':
-                    bytes_downloaded = d.get('downloaded_bytes', 0)
-                    total_bytes = d.get('total_bytes', 1)
-                    percent = int(bytes_downloaded / total_bytes * 100)
-                    progress.progress(min(percent, 100))
-                    eta = estimate_time(total_bytes, d.get('speed', 1))
-                    status.text(f"{percent}% | 예상 소요 시간: {eta}")
-                if d['status'] == 'finished':
-                    status.text("다운로드 완료!")
-
-            download_video(url, selected_format['format_id'], ext, hook)
-            st.success(f"저장 위치: `{tempfile.gettempdir()}`")
+        if st.button("전체 다운로드 시작"):
