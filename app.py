@@ -1,170 +1,197 @@
 import streamlit as st
-import os
+from yt_dlp import YoutubeDL
 import threading
-from pytube import YouTube, Playlist
-from PIL import Image
+import os
+from datetime import timedelta
 from io import BytesIO
+from PIL import Image
 import requests
-import time
 
 st.set_page_config(layout="wide")
-st.title("📥 유튜브 재생목록 다운로드")
+st.title("📥 YouTube 재생목록 다운로드 (yt-dlp 기반)")
 
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 FORMAT_OPTIONS = ["영상+소리", "영상만", "소리만"]
+RESOLUTIONS_ALL = ["1080p", "720p", "480p", "360p", "240p", "144p"]
 
-def fetch_playlist_urls(playlist_url):
-    try:
-        pl = Playlist(playlist_url)
-        return list(pl.video_urls)
-    except Exception:
-        return []
+def fetch_playlist_videos(playlist_url):
+    ydl_opts = {
+        'quiet': True,
+        'extract_flat': True,
+        'skip_download': True,
+    }
+    with YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(playlist_url, download=False)
+    entries = info.get('entries', [])
+    playlist_title = info.get('title', '재생목록')
+    video_urls = []
+    for e in entries:
+        if 'url' in e:
+            video_urls.append("https://www.youtube.com/watch?v=" + e['url'])
+    return playlist_title, video_urls
 
-@st.cache_data(show_spinner="🎥 영상 정보 불러오는 중...")
-def fetch_metadata(url):
+@st.cache_data(show_spinner="영상 정보 불러오는 중...")
+def fetch_video_info(url):
+    ydl_opts = {
+        'quiet': True,
+        'skip_download': True,
+    }
+    with YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    # 해상도 추출: video streams 중 height 값을 이용해 p 단위 변환
+    formats = info.get('formats', [])
+    res_set = set()
+    for f in formats:
+        if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('height'):
+            res_set.add(f"{f['height']}p")
+        elif f.get('vcodec') != 'none' and not f.get('acodec'):
+            res_set.add(f"{f['height']}p")
+        elif not f.get('vcodec') and f.get('acodec') != 'none':
+            res_set.add("audio_only")
+    res_list = sorted(list(res_set), key=lambda x: (x!="audio_only", int(x.replace('p','')) if x!="audio_only" else 0), reverse=True)
+
+    return {
+        'title': info.get('title'),
+        'duration': info.get('duration'),
+        'thumbnail': info.get('thumbnail'),
+        'url': url,
+        'resolutions': res_list,
+        'formats': formats,
+    }
+
+def get_image_from_url(url):
     try:
-        yt = YouTube(url)
-        resolutions = list({s.resolution for s in yt.streams.filter(progressive=True, file_extension='mp4') if s.resolution})
-        resolutions.sort(reverse=True)
-        return {
-            "title": yt.title,
-            "length": yt.length,
-            "thumbnail_url": yt.thumbnail_url,
-            "resolutions": resolutions,
-            "yt": yt
-        }
+        response = requests.get(url)
+        img = Image.open(BytesIO(response.content))
+        return img
     except:
         return None
 
-def get_thumbnail(url):
-    try:
-        img_data = requests.get(url).content
-        return Image.open(BytesIO(img_data))
-    except:
-        return None
+def download_thread(video_url, selected_format, selected_resolution, index, status_list, lock):
+    ydl_opts = {
+        'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s'),
+        'quiet': True,
+        'progress_hooks': [],
+    }
+    if selected_format == "영상+소리":
+        # best video+audio up to selected_resolution
+        ydl_opts['format'] = f'bestvideo[height<={selected_resolution.replace("p","")}]+bestaudio/best[height<={selected_resolution.replace("p","")}]'
+    elif selected_format == "영상만":
+        ydl_opts['format'] = f'bestvideo[height<={selected_resolution.replace("p","")}]'
+    else:  # 소리만
+        ydl_opts['format'] = 'bestaudio'
 
-def download_video(yt, resolution, format_type, progress_callback):
-    try:
-        if format_type == "영상+소리":
-            stream = yt.streams.filter(progressive=True, file_extension='mp4', res=resolution).first()
-        elif format_type == "영상만":
-            stream = yt.streams.filter(only_video=True, file_extension='mp4', res=resolution).first()
-        elif format_type == "소리만":
-            stream = yt.streams.filter(only_audio=True).first()
-        else:
-            return False, "형식 오류"
-
-        if not stream:
-            return False, "선택한 해상도 없음"
-
-        total = stream.filesize or 1
-        downloaded = 0
-
-        def progress_func(stream, chunk, remaining):
-            nonlocal downloaded
-            downloaded = total - remaining
+    def progress_hook(d):
+        if d['status'] == 'downloading':
+            total = d.get('total_bytes') or d.get('total_bytes_estimate') or 1
+            downloaded = d.get('downloaded_bytes', 0)
             percent = int(downloaded / total * 100)
-            progress_callback(percent)
+            with lock:
+                status_list[index] = f"다운로드 중... {percent}%"
+        elif d['status'] == 'finished':
+            with lock:
+                status_list[index] = "다운로드 완료!"
 
-        yt.register_on_progress_callback(progress_func)
+    ydl_opts['progress_hooks'] = [progress_hook]
 
-        filename = f"{yt.title}.{stream.subtype}"
-        filepath = os.path.join(DOWNLOAD_DIR, filename)
-        stream.download(output_path=DOWNLOAD_DIR, filename=filename)
-        return True, filepath
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            ydl.download([video_url])
     except Exception as e:
-        return False, str(e)
+        with lock:
+            status_list[index] = f"오류: {str(e)}"
 
-# 👉 입력창
-playlist_url = st.text_input("🔗 유튜브 재생목록 URL 입력", "")
+def main():
+    playlist_url = st.text_input("🔗 YouTube 재생목록 URL 입력")
 
-if playlist_url:
-    video_urls = fetch_playlist_urls(playlist_url)
-    total = len(video_urls)
+    if not playlist_url:
+        st.info("위에 URL을 입력해주세요.")
+        return
 
-    st.info(f"🔍 총 {total}개의 영상이 감지되었습니다.")
-    progress_bar = st.progress(0, text="🎬 영상 목록 불러오는 중...")
+    with st.spinner("재생목록 영상 불러오는 중..."):
+        try:
+            playlist_title, video_urls = fetch_playlist_videos(playlist_url)
+            total_videos = len(video_urls)
+            st.success(f"총 {total_videos}개 영상 발견: '{playlist_title}'")
+        except Exception as e:
+            st.error(f"재생목록을 불러오지 못했습니다: {str(e)}")
+            return
 
-    video_data = []
-    for idx, url in enumerate(video_urls):
-        meta = fetch_metadata(url)
-        if meta:
-            video_data.append(meta)
-        progress_bar.progress((idx + 1) / total, text=f"📦 불러오는 중... ({idx + 1}/{total})")
-    progress_bar.empty()
+    video_infos = []
+    for i, url in enumerate(video_urls):
+        info = fetch_video_info(url)
+        if info is None:
+            continue
+        video_infos.append(info)
 
-    # 전체 옵션 선택
-    st.subheader("⚙️ 전체 옵션")
+    # 전체 옵션
+    st.subheader("전체 다운로드 옵션")
     col1, col2 = st.columns(2)
     with col1:
         global_format = st.selectbox("전체 다운로드 형식", FORMAT_OPTIONS)
     with col2:
-        common_res = list({res for v in video_data for res in v['resolutions']})
-        common_res.sort(reverse=True)
+        # 전체 영상에서 가능한 해상도 교집합 구하기
+        res_sets = [set(v['resolutions']) for v in video_infos if v['resolutions']]
+        if res_sets:
+            common_res = list(set.intersection(*res_sets))
+        else:
+            common_res = []
+        common_res = [r for r in RESOLUTIONS_ALL if r in common_res]
+        if not common_res:
+            common_res = RESOLUTIONS_ALL
         global_res = st.selectbox("전체 해상도 선택", common_res)
 
-    # 개별 목록
-    st.divider()
-    st.subheader("📂 영상 목록")
-
-    threads = []
-    status_states = [("대기 중", 0) for _ in video_data]
+    st.subheader("영상 목록")
+    status_list = ["대기 중"] * len(video_infos)
     lock = threading.Lock()
 
-    for i, v in enumerate(video_data):
-        with st.container(border=True):
-            cols = st.columns([1, 3, 2, 2, 2])
-            with cols[0]:
-                thumb = get_thumbnail(v["thumbnail_url"])
-                if thumb:
-                    st.image(thumb.resize((90, 60)))
-            with cols[1]:
-                st.markdown(f"**{v['title']}**")
-                mins, secs = divmod(v["length"], 60)
-                st.caption(f"⏱️ {mins}분 {secs}초")
-            with cols[2]:
-                selected_format = st.selectbox(f"형식 {i+1}", FORMAT_OPTIONS, key=f"format_{i}")
-            with cols[3]:
-                available_res = v["resolutions"]
-                default_res = global_res if global_res in available_res else available_res[0]
-                selected_res = st.selectbox(f"해상도 {i+1}", available_res, index=available_res.index(default_res), key=f"res_{i}")
-            with cols[4]:
-                if st.button("⬇️ 다운로드", key=f"btn_{i}"):
-                    def update_progress(p):
-                        with lock:
-                            status_states[i] = ("⏬ 다운로드 중", p)
-                    thread = threading.Thread(
-                        target=lambda: (
-                            download_video(v["yt"], selected_res, selected_format, update_progress),
-                            status_states.__setitem__(i, ("✅ 완료", 100))
-                        )
-                    )
-                    threads.append(thread)
-                    thread.start()
+    for idx, vinfo in enumerate(video_infos):
+        cols = st.columns([1, 4, 1, 1, 1])
 
-            # 진행도 표시
-            label, perc = status_states[i]
-            st.progress(perc / 100, text=f"{label} ({perc}%)")
+        # 썸네일
+        thumb_img = get_image_from_url(vinfo['thumbnail'])
+        if thumb_img:
+            with cols[0]:
+                st.image(thumb_img.resize((100, 60)))
+
+        # 제목 및 길이
+        with cols[1]:
+            st.markdown(f"**{vinfo['title']}**")
+            if vinfo['duration']:
+                m, s = divmod(vinfo['duration'], 60)
+                st.caption(f"길이: {m}분 {s}초")
+
+        # 다운로드 형식 선택
+        with cols[2]:
+            selected_format = st.selectbox(f"형식 {idx}", FORMAT_OPTIONS, key=f"format_{idx}")
+
+        # 해상도 선택
+        with cols[3]:
+            available_res = [r for r in vinfo['resolutions'] if r != "audio_only"]
+            if not available_res:
+                available_res = ["audio_only"]
+            default_res = global_res if global_res in available_res else available_res[0]
+            selected_res = st.selectbox(f"해상도 {idx}", available_res, index=available_res.index(default_res), key=f"res_{idx}")
+
+        # 다운로드 버튼
+        with cols[4]:
+            if st.button("⬇️ 다운로드", key=f"download_{idx}"):
+                threading.Thread(target=download_thread, args=(vinfo['url'], selected_format, selected_res, idx, status_list, lock), daemon=True).start()
+
+        # 진행 상태 표시
+        st.write(status_list[idx])
 
     st.divider()
-
-    # 전체 다운로드 버튼
-    if st.button("📥 전체 다운로드 시작"):
-        for i, v in enumerate(video_data):
+    if st.button("전체 다운로드 시작"):
+        for idx, vinfo in enumerate(video_infos):
             selected_format = global_format
-            selected_res = global_res if global_res in v["resolutions"] else v["resolutions"][0]
+            available_res = [r for r in vinfo['resolutions'] if r != "audio_only"]
+            if not available_res:
+                available_res = ["audio_only"]
+            selected_res = global_res if global_res in available_res else available_res[0]
+            threading.Thread(target=download_thread, args=(vinfo['url'], selected_format, selected_res, idx, status_list, lock), daemon=True).start()
 
-            def update_progress(p, index=i):
-                with lock:
-                    status_states[index] = ("⏬ 다운로드 중", p)
-
-            thread = threading.Thread(
-                target=lambda idx=i: (
-                    download_video(v["yt"], selected_res, selected_format, lambda p: update_progress(p, idx)),
-                    status_states.__setitem__(idx, ("✅ 완료", 100))
-                )
-            )
-            threads.append(thread)
-            thread.start()
+if __name__ == "__main__":
+    main()
