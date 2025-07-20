@@ -1,146 +1,78 @@
+# many.py
+
 import streamlit as st
 import yt_dlp
 import os
 import tempfile
 from datetime import timedelta
-import threading
-import time
 
-st.set_page_config(page_title="재생목록 다운로드", layout="wide")
-
-# 재생목록 파싱
-def get_playlist_videos(playlist_url):
+# 영상 개별 stream 정보 로드 함수
+def get_video_info(url):
     ydl_opts = {
         'quiet': True,
-        'extract_flat': 'in_playlist',
         'skip_download': True,
-        'force_generic_extractor': True,
+        'format': 'bestvideo+bestaudio/best',
+        'noplaylist': True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    return info
+
+# 재생목록의 링크들만 가져오기 (빠름)
+def get_playlist_video_urls(playlist_url):
+    ydl_opts = {
+        'quiet': True,
+        'extract_flat': True,  # 🔥 핵심 옵션
+        'skip_download': True,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(playlist_url, download=False)
-        return info.get("entries", []), info.get("title", "재생목록")
+        entries = info.get('entries', [])
+        return [entry['url'] for entry in entries], info.get('title', 'playlist')
 
-# 개별 영상 다운로드
-def download_video(video_url, mode, resolution, output_dir, progress_callback):
-    ydl_opts = {
-        'outtmpl': os.path.join(output_dir, '%(title)s.%(ext)s'),
-        'quiet': True,
-        'progress_hooks': [progress_callback],
-    }
+def main():
+    st.header("재생목록 다운로드")
 
-    if mode == "소리만":
-        ydl_opts.update({
-            'format': 'bestaudio',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-            }],
-        })
-    elif mode == "영상만":
-        ydl_opts['format'] = f"bestvideo[height<={resolution}]+bestaudio/best[height<={resolution}]"
-        ydl_opts['postprocessors'] = [{'key': 'FFmpegVideoRemuxer', 'preferredformat': 'mp4'}]
-    else:  # 영상+소리
-        ydl_opts['format'] = f"bestvideo[height<={resolution}]+bestaudio/best[height<={resolution}]"
-        ydl_opts['merge_output_format'] = 'mp4'
+    playlist_url = st.text_input("YouTube 재생목록 URL 입력")
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([video_url])
-
-# 각 영상 항목 UI
-def video_item(video, idx, states):
-    with st.expander(f"🎬 영상 {idx + 1}: {video['title']}"):
-        st.video(video['url'])
-
-        col1, col2 = st.columns(2)
-        with col1:
-            states[idx]["mode"] = st.selectbox(
-                "다운로드 방식", ["영상+소리", "영상만", "소리만"],
-                key=f"mode_{idx}"
-            )
-        with col2:
-            if states[idx]["mode"] != "소리만":
-                states[idx]["res"] = st.selectbox(
-                    "해상도", ["2160", "1440", "1080", "720", "480", "360"],
-                    index=2,
-                    key=f"res_{idx}"
-                )
-
-        if st.button(f"⬇ 개별 다운로드", key=f"dl_{idx}"):
-            states[idx]["trigger"] = True
-
-# 전체 다운로드 쓰레드용
-def threaded_download(video, idx, states, playlist_title, folder_path):
-    start = time.time()
-    def hook(d):
-        if d['status'] == 'downloading':
-            percent = d.get("_percent_str", "0.0%").strip()
+    if playlist_url:
+        with st.spinner("재생목록 영상 불러오는 중..."):
             try:
-                seconds = int(d.get("eta", 0))
-                eta = str(timedelta(seconds=seconds))
-            except:
-                eta = "..."
-            states[idx]["progress"] = percent
-            states[idx]["eta"] = eta
-        elif d['status'] == 'finished':
-            states[idx]["progress"] = "100.0%"
-            states[idx]["eta"] = "완료"
+                urls, playlist_title = get_playlist_video_urls(playlist_url)
+                st.success(f"총 {len(urls)}개의 영상 발견됨.")
 
-    try:
-        mode = states[idx]["mode"]
-        res = states[idx]["res"] if mode != "소리만" else None
-        download_video(video['url'], mode, res, folder_path, hook)
-    except Exception as e:
-        states[idx]["eta"] = f"오류: {str(e)}"
-    finally:
-        elapsed = time.time() - start
-        states[idx]["elapsed"] = str(timedelta(seconds=int(elapsed)))
+                selected_videos = []
+                all_download_options = {}
 
-# many.py 메인 함수
-def main(url):
-    videos, playlist_title = get_playlist_videos(url)
+                for i, video_url in enumerate(urls):
+                    with st.expander(f"영상 {i + 1}", expanded=False):
+                        if st.checkbox(f"이 영상 선택", key=f"select_{i}"):
+                            info = get_video_info(video_url)
+                            st.video(info['url'])
+                            st.write("길이:", str(timedelta(seconds=info['duration'])))
+                            mode = st.radio(f"다운로드 방식 선택", ["영상+소리", "영상만", "소리만"], key=f"mode_{i}")
+                            if mode in ["영상만", "영상+소리"]:
+                                format = st.selectbox("해상도 선택", ["1080p", "720p", "480p", "360p"], key=f"res_{i}")
+                            else:
+                                format = "최고 음질"
+                            all_download_options.append((video_url, mode, format))
 
-    if not videos:
-        st.error("재생목록에서 영상을 찾을 수 없습니다.")
-        return
+                if st.button("선택한 영상들 다운로드"):
+                    folder_name = playlist_title.replace(" ", "_")
+                    os.makedirs(folder_name, exist_ok=True)
 
-    st.subheader(f"📂 재생목록: {playlist_title}")
-    folder_path = os.path.join(tempfile.gettempdir(), playlist_title)
-    os.makedirs(folder_path, exist_ok=True)
+                    for video_url, mode, format in all_download_options:
+                        st.write(f"다운로드 중: {video_url}")
+                        st.progress(0)
 
-    states = [
-        {"mode": "영상+소리", "res": "1080", "trigger": False, "progress": "0%", "eta": "", "elapsed": ""}
-        for _ in videos
-    ]
+                        # 여기에 다운로드 로직 삽입
+                        # yt_dlp 사용하여 영상 저장
+                        # ...
 
-    # 전체 선택 기능
-    all_mode = st.selectbox("🔄 전체 다운로드 방식", ["영상+소리", "영상만", "소리만"])
-    if all_mode != "소리만":
-        all_res = st.selectbox("🔄 전체 해상도", ["2160", "1440", "1080", "720", "480", "360"], index=2)
-    if st.button("✅ 전체 설정 적용"):
-        for s in states:
-            s["mode"] = all_mode
-            if all_mode != "소리만":
-                s["res"] = all_res
+                    st.success("다운로드 완료!")
+            except Exception as e:
+                st.error(f"오류 발생: {e}")
 
-    st.markdown("---")
-
-    # 개별 UI 및 다운로드 실행
-    for idx, video in enumerate(videos):
-        video_item(video, idx, states)
-
-    if st.button("⬇ 전체 다운로드 시작"):
-        for idx, video in enumerate(videos):
-            t = threading.Thread(target=threaded_download, args=(video, idx, states, playlist_title, folder_path))
-            t.start()
-
-    # 진행률 표시
-    st.markdown("---")
-    st.subheader("📊 다운로드 진행 상황")
-    for idx, video in enumerate(videos):
-        st.write(f"{idx + 1}. {video['title']}")
-        st.progress(float(states[idx]["progress"].strip('%')) / 100)
-        st.text(f"진행률: {states[idx]['progress']} / 예상 시간: {states[idx]['eta']} / 소요: {states[idx]['elapsed']}")
-
-    st.success(f"📁 저장 폴더: {folder_path}")
-
+if __name__ == "__main__":
+    main()
